@@ -31,7 +31,7 @@ public class UserStats
 [Service]
 public class MessageArchiveService
 {
-    const string DB_PATH = "../JsonData/Archive/messages.db";
+    const string DB_PATH = "ArchiveData/messages.db";
 
     readonly DiscordSocketClient _discord;
     readonly LoggingService _log;
@@ -74,10 +74,11 @@ public class MessageArchiveService
         }
     }
 
-    async Task OnReady()
+    Task OnReady()
     {
         _discord.Ready -= OnReady;
-        await Task.Run(BackfillAllChannelsAsync);
+        _ = Task.Run(BackfillAllChannelsAsync);
+        return Task.CompletedTask;
     }
 
     async Task OnMessageReceived(SocketMessage socketMessage)
@@ -150,6 +151,10 @@ public class MessageArchiveService
 
     async Task BackfillChannelAsync(SocketTextChannel channel)
     {
+        var firstPage = await channel.GetMessagesAsync(1).FlattenAsync();
+        if (!firstPage.Any())
+            return;
+
         var totalSaved = 0;
         ulong? oldestMessageId = null;
 
@@ -157,14 +162,14 @@ public class MessageArchiveService
 
         while (true)
         {
-            IReadOnlyCollection<IMessage> messages;
+            List<IMessage> messages;
             if (oldestMessageId == null)
             {
-                messages = await channel.GetMessagesAsync(100).FlattenAsync();
+                messages = (await channel.GetMessagesAsync(100).FlattenAsync()).ToList();
             }
             else
             {
-                messages = await channel.GetMessagesAsync(oldestMessageId.Value, Direction.Before, 100).FlattenAsync();
+                messages = (await channel.GetMessagesAsync(oldestMessageId.Value, Direction.Before, 100).FlattenAsync()).ToList();
             }
 
             if (!messages.Any()) break;
