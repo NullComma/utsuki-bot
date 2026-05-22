@@ -11,3 +11,4 @@ services:
       BOT_VERSION: ${BOT_VERSION}
     volumes:
       - ./JsonData:/app/JsonData
+      - ./ArchiveData:/app/ArchiveData

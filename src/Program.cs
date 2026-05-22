@@ -77,6 +77,8 @@ internal static class Program {
 
         await host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();
 
+        host.Services.GetRequiredService<MessageArchiveService>().Start();
+
         await host.RunAsync();
     }
 
