@@ -299,6 +299,29 @@ public class MessageArchiveService
         };
     }
 
+    public async Task<int> PurgeBadEntriesAsync()
+    {
+        await _dbLock.WaitAsync();
+        try
+        {
+            using var ctx = CreateContext();
+            var bad = await ctx.Messages
+                .Where(m => m.Content.Length <= 2 || !char.IsLetter(m.Content[0]))
+                .ToListAsync();
+            var count = bad.Count;
+            if (count > 0)
+            {
+                ctx.Messages.RemoveRange(bad);
+                await ctx.SaveChangesAsync();
+            }
+            return count;
+        }
+        finally
+        {
+            _dbLock.Release();
+        }
+    }
+
     static bool ShouldArchiveContent(string content)
     {
         if (string.IsNullOrEmpty(content)) return false;
