@@ -44,11 +44,14 @@ public class MessageArchiveService
     public void Start()
     {
         _discord.MessageReceived += OnMessageReceived;
-
         if (!_backfillComplete)
-        {
-            _ = BackfillAllChannelsAsync();
-        }
+            _discord.Ready += OnReady;
+    }
+
+    async Task OnReady()
+    {
+        _discord.Ready -= OnReady;
+        await BackfillAllChannelsAsync();
     }
 
     async Task OnMessageReceived(SocketMessage socketMessage)
@@ -59,11 +62,6 @@ public class MessageArchiveService
 
         try
         {
-            using var ctx = CreateContext();
-
-            if (await ctx.Messages.AnyAsync(m => m.MessageId == userMessage.Id))
-                return;
-
             var record = new MessageRecord
             {
                 MessageId = userMessage.Id,
@@ -81,6 +79,9 @@ public class MessageArchiveService
             await _dbLock.WaitAsync();
             try
             {
+                using var ctx = CreateContext();
+                if (await ctx.Messages.AnyAsync(m => m.MessageId == userMessage.Id))
+                    return;
                 ctx.Messages.Add(record);
                 await ctx.SaveChangesAsync();
             }
@@ -124,25 +125,24 @@ public class MessageArchiveService
     async Task BackfillChannelAsync(SocketTextChannel channel)
     {
         var totalSaved = 0;
-        var oldestTimestamp = DateTime.MaxValue;
+        ulong? oldestMessageId = null;
 
         _log.Info($"Backfilling #{channel.Name}...");
 
         while (true)
         {
             IReadOnlyCollection<IMessage> messages;
-            if (oldestTimestamp == DateTime.MaxValue)
+            if (oldestMessageId == null)
             {
                 messages = await channel.GetMessagesAsync(100).FlattenAsync();
             }
             else
             {
-                messages = await channel.GetMessagesAsync(oldestTimestamp, Direction.Before, 100).FlattenAsync();
+                messages = await channel.GetMessagesAsync(oldestMessageId.Value, Direction.Before, 100).FlattenAsync();
             }
 
             if (!messages.Any()) break;
 
-            using var ctx = CreateContext();
             var newRecords = new List<MessageRecord>();
 
             foreach (var msg in messages)
@@ -150,9 +150,6 @@ public class MessageArchiveService
                 if (msg is not IUserMessage userMsg) continue;
                 if (userMsg.Author.IsBot) continue;
                 if (string.IsNullOrEmpty(userMsg.Content)) continue;
-
-                var exists = await ctx.Messages.AnyAsync(m => m.MessageId == msg.Id);
-                if (exists) continue;
 
                 newRecords.Add(new MessageRecord
                 {
@@ -167,8 +164,6 @@ public class MessageArchiveService
                         ? string.Join(";", msg.Attachments.Select(a => a.Url))
                         : null
                 });
-
-                oldestTimestamp = msg.Timestamp.UtcDateTime;
             }
 
             if (newRecords.Count > 0)
@@ -176,8 +171,21 @@ public class MessageArchiveService
                 await _dbLock.WaitAsync();
                 try
                 {
+                    using var ctx = CreateContext();
                     ctx.Messages.AddRange(newRecords);
                     await ctx.SaveChangesAsync();
+                }
+                catch (DbUpdateException) when (newRecords.Count > 0)
+                {
+                    using var ctx = CreateContext();
+                    foreach (var record in newRecords)
+                    {
+                        if (!await ctx.Messages.AnyAsync(m => m.MessageId == record.MessageId))
+                        {
+                            ctx.Messages.Add(record);
+                            await ctx.SaveChangesAsync();
+                        }
+                    }
                 }
                 finally
                 {
@@ -185,6 +193,8 @@ public class MessageArchiveService
                 }
                 totalSaved += newRecords.Count;
             }
+
+            oldestMessageId = messages.Last().Id;
 
             if (messages.Count < 100) break;
 
