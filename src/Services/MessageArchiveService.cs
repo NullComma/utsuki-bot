@@ -6,6 +6,28 @@ using Microsoft.EntityFrameworkCore;
 
 namespace App.Services;
 
+public class ArchiveStats
+{
+    public long TotalMessages { get; set; }
+    public int TotalChannels { get; set; }
+    public DateTime? OldestMessage { get; set; }
+    public DateTime? NewestMessage { get; set; }
+    public bool IsBackfilling { get; set; }
+    public bool IsComplete { get; set; }
+    public long DbSizeBytes { get; set; }
+    public int TotalUsers { get; set; }
+}
+
+public class UserStats
+{
+    public ulong UserId { get; set; }
+    public string UserName { get; set; } = string.Empty;
+    public long MessageCount { get; set; }
+    public DateTime? FirstMessage { get; set; }
+    public DateTime? LastMessage { get; set; }
+    public int ChannelCount { get; set; }
+}
+
 [Service]
 public class MessageArchiveService
 {
@@ -215,5 +237,60 @@ public class MessageArchiveService
                 .UseSqlite($"Data Source={DB_PATH}")
                 .Options
         );
+    }
+
+    public async Task<ArchiveStats> GetArchiveStatsAsync()
+    {
+        using var ctx = CreateContext();
+
+        var totalMessages = await ctx.Messages.LongCountAsync();
+        var totalChannels = await ctx.Messages.Select(m => m.ChannelId).Distinct().CountAsync();
+        var totalUsers = await ctx.Messages.Select(m => m.AuthorId).Distinct().CountAsync();
+        var oldest = await ctx.Messages.OrderBy(m => m.Timestamp).FirstOrDefaultAsync();
+        var newest = await ctx.Messages.OrderByDescending(m => m.Timestamp).FirstOrDefaultAsync();
+
+        long dbSize = 0;
+        try
+        {
+            var fi = new FileInfo(DB_PATH);
+            if (fi.Exists) dbSize = fi.Length;
+        }
+        catch { }
+
+        return new ArchiveStats
+        {
+            TotalMessages = totalMessages,
+            TotalChannels = totalChannels,
+            TotalUsers = totalUsers,
+            OldestMessage = oldest?.Timestamp,
+            NewestMessage = newest?.Timestamp,
+            IsBackfilling = _backfillStarted && !_backfillComplete,
+            IsComplete = _backfillComplete,
+            DbSizeBytes = dbSize
+        };
+    }
+
+    public async Task<UserStats?> GetUserStatsAsync(ulong userId)
+    {
+        using var ctx = CreateContext();
+
+        var msgs = ctx.Messages.Where(m => m.AuthorId == userId);
+
+        var count = await msgs.LongCountAsync();
+        if (count == 0) return null;
+
+        var first = await msgs.OrderBy(m => m.Timestamp).FirstAsync();
+        var last = await msgs.OrderByDescending(m => m.Timestamp).FirstAsync();
+        var channels = await msgs.Select(m => m.ChannelId).Distinct().CountAsync();
+
+        return new UserStats
+        {
+            UserId = userId,
+            UserName = first.AuthorName,
+            MessageCount = count,
+            FirstMessage = first.Timestamp,
+            LastMessage = last.Timestamp,
+            ChannelCount = channels
+        };
     }
 }
