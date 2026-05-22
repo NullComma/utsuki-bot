@@ -74,6 +74,29 @@ public class ArchiveModule : InteractionModuleBase<SocketInteractionContext>
         await FollowupAsync(embed: embed.Build());
     }
 
+    [SlashCommand("archiveclean", "Purge messages that don't meet current archive filters")]
+    [RequireUserPermission(GuildPermission.Administrator)]
+    public async Task CleanArchive()
+    {
+        await DeferAsync(ephemeral: true);
+
+        var before = await _archive.GetArchiveStatsAsync();
+        var deleted = await _archive.PurgeBadEntriesAsync();
+        var after = await _archive.GetArchiveStatsAsync();
+
+        var embed = new EmbedBuilder
+        {
+            Title = "Archive Cleanup",
+            Color = deleted > 0 ? Color.Green : Color.Blue
+        };
+
+        embed.AddField("Deleted", $"{deleted:N0} messages", true);
+        embed.AddField("Before", $"{before.TotalMessages:N0} messages", true);
+        embed.AddField("After", $"{after.TotalMessages:N0} messages", true);
+
+        await FollowupAsync(embed: embed.Build(), ephemeral: true);
+    }
+
     static string FormatFileSize(long bytes) => bytes switch
     {
         < 1024 => $"{bytes} B",

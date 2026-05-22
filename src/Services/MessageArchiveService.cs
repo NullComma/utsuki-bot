@@ -85,7 +85,7 @@ public class MessageArchiveService
     {
         if (socketMessage is not SocketUserMessage userMessage) return;
         if (userMessage.Author.IsBot) return;
-        if (string.IsNullOrEmpty(userMessage.Content)) return;
+        if (!ShouldArchiveContent(userMessage.Content)) return;
 
         try
         {
@@ -180,7 +180,7 @@ public class MessageArchiveService
             {
                 if (msg is not IUserMessage userMsg) continue;
                 if (userMsg.Author.IsBot) continue;
-                if (string.IsNullOrEmpty(userMsg.Content)) continue;
+                if (!ShouldArchiveContent(userMsg.Content)) continue;
 
                 newRecords.Add(new MessageRecord
                 {
@@ -297,5 +297,36 @@ public class MessageArchiveService
             LastMessage = last.Timestamp,
             ChannelCount = channels
         };
+    }
+
+    public async Task<int> PurgeBadEntriesAsync()
+    {
+        await _dbLock.WaitAsync();
+        try
+        {
+            using var ctx = CreateContext();
+            var bad = await ctx.Messages
+                .Where(m => m.Content.Length <= 2 || !char.IsLetter(m.Content[0]))
+                .ToListAsync();
+            var count = bad.Count;
+            if (count > 0)
+            {
+                ctx.Messages.RemoveRange(bad);
+                await ctx.SaveChangesAsync();
+            }
+            return count;
+        }
+        finally
+        {
+            _dbLock.Release();
+        }
+    }
+
+    static bool ShouldArchiveContent(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return false;
+        if (content.Length <= 2) return false;
+        if (!char.IsLetter(content[0])) return false;
+        return true;
     }
 }
