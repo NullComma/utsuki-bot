@@ -2,7 +2,6 @@ using App.Attributes;
 using App.Models;
 using Discord;
 using Discord.WebSocket;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace App.Services;
@@ -15,8 +14,8 @@ public class MessageArchiveService
     readonly DiscordSocketClient _discord;
     readonly LoggingService _log;
     readonly SemaphoreSlim _dbLock = new(1, 1);
-    bool _backfillStarted;
-    bool _backfillComplete;
+    volatile bool _backfillStarted;
+    volatile bool _backfillComplete;
 
     public MessageArchiveService(DiscordSocketClient discord, LoggingService log)
     {
@@ -45,13 +44,18 @@ public class MessageArchiveService
     {
         _discord.MessageReceived += OnMessageReceived;
         if (!_backfillComplete)
-            _discord.Ready += OnReady;
+        {
+            if (_discord.ConnectionState == ConnectionState.Connected)
+                _ = Task.Run(BackfillAllChannelsAsync);
+            else
+                _discord.Ready += OnReady;
+        }
     }
 
     async Task OnReady()
     {
         _discord.Ready -= OnReady;
-        await BackfillAllChannelsAsync();
+        await Task.Run(BackfillAllChannelsAsync);
     }
 
     async Task OnMessageReceived(SocketMessage socketMessage)
@@ -206,11 +210,9 @@ public class MessageArchiveService
 
     ArchiveDbContext CreateContext()
     {
-        var connection = new SqliteConnection($"Data Source={DB_PATH}");
-        connection.Open();
         return new ArchiveDbContext(
             new DbContextOptionsBuilder<ArchiveDbContext>()
-                .UseSqlite(connection)
+                .UseSqlite($"Data Source={DB_PATH}")
                 .Options
         );
     }
