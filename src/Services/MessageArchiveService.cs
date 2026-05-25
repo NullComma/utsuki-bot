@@ -28,14 +28,31 @@ public class UserStats
     public int ChannelCount { get; set; }
 }
 
+enum BackfillResult { Complete, NeedRetry, Skipped }
+
+class RetryState
+{
+    public SocketTextChannel Channel;
+    public ulong OldestMessageId;
+    public DateTime NextRetryAt;
+    public int DelaySec;
+    public const int MaxDelaySec = 300;
+}
+
 [Service]
 public class MessageArchiveService
 {
     const string DB_PATH = "ArchiveData/messages.db";
 
+    static readonly Dictionary<ulong, ulong> KnownFirstMessages = new()
+    {
+        [264800866169651203] = 264813684281311234
+    };
+
     readonly DiscordSocketClient _discord;
     readonly LoggingService _log;
     readonly SemaphoreSlim _dbLock = new(1, 1);
+    readonly List<RetryState> _retryQueue = new();
     volatile bool _backfillStarted;
     volatile bool _backfillComplete;
 
@@ -56,10 +73,20 @@ public class MessageArchiveService
         using var ctx = CreateContext();
         ctx.Database.EnsureCreated();
 
-        var hasMessages = ctx.Messages.Any();
-        _backfillComplete = hasMessages;
+        var oldest = ctx.Messages.OrderBy(m => m.Timestamp).FirstOrDefault();
+        _backfillComplete = true;
 
-        _log.Info($"Archive database ready at {DB_PATH} (has data: {hasMessages})");
+        foreach (var (channelId, targetId) in KnownFirstMessages)
+        {
+            var hasTarget = ctx.Messages.Any(m => m.MessageId == targetId);
+            if (!hasTarget)
+            {
+                _backfillComplete = false;
+                break;
+            }
+        }
+
+        _log.Info($"Archive database ready at {DB_PATH} (has data: {oldest != null}, oldest: {oldest?.Timestamp:O})");
     }
 
     public void Start()
@@ -130,13 +157,17 @@ public class MessageArchiveService
 
         _log.Info("Starting full channel backfill...");
 
-        foreach (var guild in _discord.Guilds)
+        var guilds = _discord.Guilds.OrderBy(g => g.Id).ToList();
+        foreach (var guild in guilds)
         {
             foreach (var channel in guild.TextChannels)
             {
                 try
                 {
-                    await BackfillChannelAsync(channel);
+                    if (await BackfillChannelAsync(channel) == BackfillResult.NeedRetry)
+                    {
+                        // retry handled by background loop
+                    }
                 }
                 catch (Exception e)
                 {
@@ -145,34 +176,137 @@ public class MessageArchiveService
             }
         }
 
-        _backfillComplete = true;
-        _log.Info("Full backfill complete. All channels archived.");
+        if (_retryQueue.Count == 0)
+        {
+            _backfillComplete = true;
+            _log.Info("Full backfill complete. All channels archived.");
+        }
+        else
+        {
+            _log.Info($"Initial pass done. {_retryQueue.Count} channels need deep archive retry.");
+            _ = RunRetryLoopAsync();
+        }
     }
 
-    async Task BackfillChannelAsync(SocketTextChannel channel)
+    async Task RunRetryLoopAsync()
     {
-        var firstPage = await channel.GetMessagesAsync(1).FlattenAsync();
-        if (!firstPage.Any())
-            return;
+        while (_retryQueue.Count > 0)
+        {
+            var now = DateTime.UtcNow;
+            var due = new List<RetryState>();
+
+            lock (_retryQueue)
+            {
+                due.AddRange(_retryQueue.Where(r => now >= r.NextRetryAt));
+            }
+
+            foreach (var state in due)
+            {
+                try
+                {
+                    var result = await BackfillChannelAsync(state.Channel, state.OldestMessageId);
+                    if (result == BackfillResult.Complete)
+                    {
+                        lock (_retryQueue) _retryQueue.Remove(state);
+                        _log.Info($"Deep archive complete for #{state.Channel.Name}.");
+                    }
+                    else if (result == BackfillResult.NeedRetry)
+                    {
+                        state.DelaySec = Math.Min(state.DelaySec * 2, RetryState.MaxDelaySec);
+                        state.NextRetryAt = DateTime.UtcNow.AddSeconds(state.DelaySec);
+                    }
+                }
+                catch (Exception e)
+                {
+                    state.DelaySec = Math.Min(state.DelaySec * 2, RetryState.MaxDelaySec);
+                    state.NextRetryAt = DateTime.UtcNow.AddSeconds(state.DelaySec);
+                    _log.Error($"Retry failed for #{state.Channel.Name}: {e.Message}. Next retry in {state.DelaySec}s.");
+                }
+            }
+
+            if (_retryQueue.Count == 0)
+            {
+                _backfillComplete = true;
+                _log.Info("Deep archive retry complete. All channels fully archived.");
+                return;
+            }
+
+            await Task.Delay(5000);
+        }
+    }
+
+    async Task<BackfillResult> BackfillChannelAsync(SocketTextChannel channel, ulong? resumeFromId = null)
+    {
+        KnownFirstMessages.TryGetValue(channel.Id, out var targetMessageId);
+
+        if (resumeFromId == null)
+        {
+            var firstPage = await channel.GetMessagesAsync(1).FlattenAsync();
+            if (!firstPage.Any())
+                return BackfillResult.Skipped;
+            resumeFromId = firstPage.First().Id;
+            _log.Info($"Backfilling #{channel.Name}...");
+        }
 
         var totalSaved = 0;
-        ulong? oldestMessageId = null;
-
-        _log.Info($"Backfilling #{channel.Name}...");
+        var oldestMessageId = resumeFromId;
+        var emptyRetries = 0;
+        var delaySec = 5;
 
         while (true)
         {
             List<IMessage> messages;
-            if (oldestMessageId == null)
-            {
-                messages = (await channel.GetMessagesAsync(100).FlattenAsync()).ToList();
-            }
-            else
+            try
             {
                 messages = (await channel.GetMessagesAsync(oldestMessageId.Value, Direction.Before, 100).FlattenAsync()).ToList();
             }
+            catch (Exception e)
+            {
+                _log.Warning($"Backfill fetch error #{channel.Name}: {e.Message}. Retry in {delaySec}s.");
+                await Task.Delay(TimeSpan.FromSeconds(delaySec));
+                delaySec = Math.Min(delaySec * 2, 60);
+                continue;
+            }
 
-            if (!messages.Any()) break;
+            if (messages.Count == 0)
+            {
+                if (targetMessageId > 0 && oldestMessageId > targetMessageId)
+                {
+                    emptyRetries++;
+                    _log.Info($"Deep archive: #{channel.Name} at ID {oldestMessageId}, waiting for Discord cold storage ({emptyRetries}).");
+
+                    if (!_retryQueue.Any(r => r.Channel.Id == channel.Id))
+                    {
+                        lock (_retryQueue)
+                        {
+                            _retryQueue.Add(new RetryState
+                            {
+                                Channel = channel,
+                                OldestMessageId = oldestMessageId.Value,
+                                NextRetryAt = DateTime.UtcNow.AddSeconds(delaySec),
+                                DelaySec = delaySec
+                            });
+                        }
+                    }
+                    else
+                    {
+                        lock (_retryQueue)
+                        {
+                            var existing = _retryQueue.First(r => r.Channel.Id == channel.Id);
+                            existing.OldestMessageId = oldestMessageId.Value;
+                            existing.NextRetryAt = DateTime.UtcNow.AddSeconds(delaySec);
+                            existing.DelaySec = Math.Min(existing.DelaySec * 2, RetryState.MaxDelaySec);
+                        }
+                    }
+
+                    return BackfillResult.NeedRetry;
+                }
+
+                break;
+            }
+
+            emptyRetries = 0;
+            delaySec = 5;
 
             var newRecords = new List<MessageRecord>();
 
@@ -227,12 +361,33 @@ public class MessageArchiveService
 
             oldestMessageId = messages.Last().Id;
 
-            if (messages.Count < 100) break;
+            if (messages.Count < 100)
+            {
+                if (targetMessageId > 0 && oldestMessageId > targetMessageId)
+                {
+                    if (!_retryQueue.Any(r => r.Channel.Id == channel.Id))
+                    {
+                        lock (_retryQueue)
+                        {
+                            _retryQueue.Add(new RetryState
+                            {
+                                Channel = channel,
+                                OldestMessageId = oldestMessageId.Value,
+                                NextRetryAt = DateTime.UtcNow.AddSeconds(delaySec),
+                                DelaySec = delaySec
+                            });
+                        }
+                    }
+                    return BackfillResult.NeedRetry;
+                }
+                break;
+            }
 
             await Task.Delay(200);
         }
 
         _log.Info($"Backfill for #{channel.Name} complete. Saved {totalSaved} messages.");
+        return BackfillResult.Complete;
     }
 
     ArchiveDbContext CreateContext()
