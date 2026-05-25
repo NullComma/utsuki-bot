@@ -1,0 +1,14 @@
+services:
+  utsuki-bot-stage:
+    image: utsuki-bot-stage
+    container_name: utsuki-bot-stage
+    restart: unless-stopped
+    environment:
+      DISCORD_TOKEN_UTSUKI: ${DISCORD_TOKEN_UTSUKI}
+      AI_ENDPOINT: ${AI_ENDPOINT}
+      AI_TOKEN: ${AI_TOKEN}
+      API_KEY_WEATHER: ${API_KEY_WEATHER}
+      BOT_VERSION: ${BOT_VERSION}
+    volumes:
+      - ./JsonData:/app/JsonData
+      - ./ArchiveData:/app/ArchiveData
