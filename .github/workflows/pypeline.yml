@@ -24,10 +24,11 @@ jobs:
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
       - name: checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
       - name: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
+          context: .
           push: false
           tags: 'utsuki-bot-net'
           file: Dockerfile
