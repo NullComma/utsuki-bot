@@ -36,7 +36,7 @@ public class ArchiveModule : InteractionModuleBase<SocketInteractionContext>
         if (stats.NewestMessage.HasValue)
             embed.AddField("Newest Message", $"<t:{ToUnix(stats.NewestMessage.Value)}:R>", true);
 
-        embed.AddField("Status", stats.IsBackfilling ? "Backfilling in progress..." : stats.IsComplete ? "Complete" : "Waiting", true);
+        embed.AddField("Status", stats.IsBackfilling ? "Initial backfilling..." : "Ongoing archive", true);
 
         await FollowupAsync(embed: embed.Build());
     }
