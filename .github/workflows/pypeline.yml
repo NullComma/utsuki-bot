@@ -30,7 +30,6 @@ jobs:
         with:
           context: .
           push: false
-          load: true
           tags: 'utsuki-bot-net'
           file: Dockerfile
       - name: stop previous services
