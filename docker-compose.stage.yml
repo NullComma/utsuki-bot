@@ -9,6 +9,7 @@ services:
       AI_TOKEN: ${AI_TOKEN}
       API_KEY_WEATHER: ${API_KEY_WEATHER}
       BOT_VERSION: ${BOT_VERSION}
+      ARCHIVE_GUILD_IDS: ${ARCHIVE_GUILD_IDS:-}
     volumes:
       - ./JsonData:/app/JsonData
-      - ./ArchiveData:/app/ArchiveData
+      - ./db:/app/db

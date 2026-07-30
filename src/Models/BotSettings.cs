@@ -9,4 +9,5 @@ public class BotSettings
     public string WeatherApiKey { get; set; } = string.Empty;
     public ulong MainGuildId { get; set; }
     public ulong GgjGuildId { get; set; }
+    public List<ulong> ArchiveGuildIds { get; set; } = new();
 }

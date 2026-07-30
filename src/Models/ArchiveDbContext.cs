@@ -20,6 +20,8 @@ public class ArchiveDbContext : DbContext
             entity.HasIndex(e => e.ChannelId);
             entity.HasIndex(e => e.GuildId);
             entity.HasIndex(e => e.MessageId).IsUnique();
+            entity.HasIndex(e => e.Timestamp);
+            entity.HasIndex(e => new { e.AuthorId, e.Timestamp });
         });
     }
 }

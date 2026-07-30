@@ -58,6 +58,15 @@ internal static class Program {
             settings.WeatherApiKey = Configuration["API_KEY_WEATHER"] ?? string.Empty;
             settings.MainGuildId = ulong.TryParse(Configuration["MAIN_GUILD_ID"], out var mgid) ? mgid : 264800866169651203; // Concord
             settings.GgjGuildId = ulong.TryParse(Configuration["GGJ_GUILD_ID"], out var ggid) ? ggid : default;
+            var archiveIds = Configuration["ARCHIVE_GUILD_IDS"];
+            if (!string.IsNullOrWhiteSpace(archiveIds))
+            {
+                settings.ArchiveGuildIds = archiveIds
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(id => ulong.TryParse(id, out var parsed) ? parsed : 0)
+                    .Where(id => id != 0)
+                    .ToList();
+            }
         });
 
         ConfigureServices(builder.Services);

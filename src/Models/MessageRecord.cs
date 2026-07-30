@@ -16,4 +16,10 @@ public class MessageRecord
     public string Content { get; set; } = string.Empty;
     public DateTime Timestamp { get; set; }
     public string? Attachments { get; set; }
+
+    public string? ChannelName { get; set; }
+    public string? ChannelTopic { get; set; }
+    public string? ChannelType { get; set; }
+    public string? MessageType { get; set; }
+    public ulong? ReferenceMessageId { get; set; }
 }

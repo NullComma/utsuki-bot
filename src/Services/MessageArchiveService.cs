@@ -3,6 +3,8 @@ using App.Models;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using System.Text.RegularExpressions;
 
 namespace App.Services;
 
@@ -41,18 +43,30 @@ class RetryState
 [Service]
 public class MessageArchiveService
 {
-    const string DB_PATH = "ArchiveData/messages.db";
+    const string DB_PATH = "db/messages.db";
 
     readonly DiscordSocketClient _discord;
     readonly LoggingService _log;
     readonly SemaphoreSlim _dbLock = new(1, 1);
     readonly List<RetryState> _retryQueue = new();
+    readonly HashSet<ulong> _archiveGuildIds;
     volatile bool _backfillStarted;
 
-    public MessageArchiveService(DiscordSocketClient discord, LoggingService log)
+    static readonly Regex BotCommandPattern = new(
+        @"^(pull|push|fetch|merge|rebase|commit|deploy|checkout)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled
+    );
+
+    public MessageArchiveService(DiscordSocketClient discord, LoggingService log, IOptionsSnapshot<BotSettings> settings)
     {
         _discord = discord;
         _log = log;
+        _archiveGuildIds = new HashSet<ulong>(settings.Value.ArchiveGuildIds);
+
+        if (_archiveGuildIds.Count > 0)
+            _log.Info($"Archive restricted to {_archiveGuildIds.Count} guild(s): {string.Join(", ", _archiveGuildIds)}");
+        else
+            _log.Info("Archiving all guilds (no ArchiveGuildIds filter).");
 
         EnsureDatabase();
     }
@@ -65,8 +79,51 @@ public class MessageArchiveService
 
         using var ctx = CreateContext();
         ctx.Database.EnsureCreated();
+        MigrateSchema(ctx);
 
         _log.Info($"Archive database ready at {DB_PATH}");
+    }
+
+    void MigrateSchema(ArchiveDbContext ctx)
+    {
+        using var cmd = ctx.Database.GetDbConnection().CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(Messages)";
+        if (cmd.Connection!.State != System.Data.ConnectionState.Open)
+            cmd.Connection.Open();
+        using var reader = cmd.ExecuteReader();
+        var columns = new HashSet<string>();
+        while (reader.Read())
+            columns.Add(reader.GetString(1));
+
+        void AddColumnIfMissing(string name, string type)
+        {
+            if (columns.Contains(name)) return;
+            using var c = ctx.Database.GetDbConnection().CreateCommand();
+            c.CommandText = $"ALTER TABLE Messages ADD COLUMN {name} {type}";
+            c.ExecuteNonQuery();
+            _log.Info($"Added column Messages.{name}");
+        }
+
+        AddColumnIfMissing("ChannelName", "TEXT");
+        AddColumnIfMissing("ChannelTopic", "TEXT");
+        AddColumnIfMissing("ChannelType", "TEXT");
+        AddColumnIfMissing("MessageType", "TEXT");
+        AddColumnIfMissing("ReferenceMessageId", "INTEGER");
+
+        // Ensure new indexes exist (ignore errors if they already exist)
+        void AddIndex(string sql)
+        {
+            try
+            {
+                using var c = ctx.Database.GetDbConnection().CreateCommand();
+                c.CommandText = sql;
+                c.ExecuteNonQuery();
+            }
+            catch { }
+        }
+
+        AddIndex("CREATE INDEX IF NOT EXISTS IX_Messages_Timestamp ON Messages(Timestamp)");
+        AddIndex("CREATE INDEX IF NOT EXISTS IX_Messages_AuthorId_Timestamp ON Messages(AuthorId, Timestamp)");
     }
 
     public void Start()
@@ -88,20 +145,35 @@ public class MessageArchiveService
         if (userMessage.Author.IsBot) return;
         if (!ShouldArchiveContent(userMessage.Content)) return;
 
+        var guildId = (userMessage.Channel as IGuildChannel)?.GuildId ?? 0;
+        if (_archiveGuildIds.Count > 0 && !_archiveGuildIds.Contains(guildId)) return;
+
         try
         {
+            var channel = userMessage.Channel;
             var record = new MessageRecord
             {
                 MessageId = userMessage.Id,
-                ChannelId = userMessage.Channel.Id,
-                GuildId = (userMessage.Channel as IGuildChannel)?.GuildId ?? 0,
+                ChannelId = channel.Id,
+                GuildId = guildId,
                 AuthorId = userMessage.Author.Id,
                 AuthorName = userMessage.Author.Username,
                 Content = userMessage.Content,
                 Timestamp = userMessage.Timestamp.UtcDateTime,
                 Attachments = userMessage.Attachments.Count > 0
                     ? string.Join(";", userMessage.Attachments.Select(a => a.Url))
-                    : null
+                    : null,
+                ChannelName = channel is ITextChannel tc ? tc.Name : null,
+                ChannelTopic = channel is ITextChannel ttc ? ttc.Topic : null,
+                ChannelType = channel switch
+                {
+                    ITextChannel _ => "text",
+                    IThreadChannel _ => "thread",
+                    IDMChannel _ => "dm",
+                    _ => "unknown"
+                },
+                MessageType = userMessage.ReferencedMessage != null ? "reply" : "normal",
+                ReferenceMessageId = userMessage.ReferencedMessage?.Id
             };
 
             await _dbLock.WaitAsync();
@@ -131,9 +203,16 @@ public class MessageArchiveService
 
         _log.Info("Starting full channel backfill...");
 
-        var guilds = _discord.Guilds.OrderBy(g => g.Id).ToList();
+        var guilds = _discord.Guilds
+            .Where(g => _archiveGuildIds.Count == 0 || _archiveGuildIds.Contains(g.Id))
+            .OrderBy(g => g.Id).ToList();
+
+        if (_archiveGuildIds.Count > 0)
+            _log.Info($"Backfill restricted to {guilds.Count} guild(s): {string.Join(", ", guilds.Select(g => g.Name))}");
+
         foreach (var guild in guilds)
         {
+            _log.Info($"Backfilling guild: {guild.Name} ({guild.Id})");
             foreach (var channel in guild.TextChannels)
             {
                 try
@@ -156,6 +235,8 @@ public class MessageArchiveService
             _log.Info($"Initial pass done. {_retryQueue.Count} channels queued for ongoing deep archive.");
             _ = RunRetryLoopAsync();
         }
+
+        _ = BackfillChannelMetadataAsync();
     }
 
     async Task RunRetryLoopAsync()
@@ -253,7 +334,12 @@ public class MessageArchiveService
                     Timestamp = msg.Timestamp.UtcDateTime,
                     Attachments = msg.Attachments.Count > 0
                         ? string.Join(";", msg.Attachments.Select(a => a.Url))
-                        : null
+                        : null,
+                    ChannelName = channel.Name,
+                    ChannelTopic = channel.Topic,
+                    ChannelType = "text",
+                    MessageType = msg.Reference is not null ? "reply" : "normal",
+                    ReferenceMessageId = msg.Reference?.MessageId
                 });
             }
 
@@ -289,12 +375,65 @@ public class MessageArchiveService
 
             if (messages.Count < 100)
             {
+                if (messages.Count > 0)
+                {
+                    _log.Info($"Reached end of history for #{channel.Name} ({totalSaved} new messages).");
+                    return BackfillResult.Complete;
+                }
                 QueueRetry(channel, oldestMessageId!.Value);
                 return BackfillResult.NeedRetry;
             }
 
             await Task.Delay(200);
         }
+    }
+
+    public async Task BackfillChannelMetadataAsync()
+    {
+        _log.Info("Backfilling channel metadata for existing records...");
+        using var ctx = CreateContext();
+
+        var channelIds = await ctx.Messages
+            .Where(m => m.ChannelName == null)
+            .Select(m => m.ChannelId)
+            .Distinct()
+            .ToListAsync();
+
+        if (channelIds.Count == 0)
+        {
+            _log.Info("All records already have channel metadata.");
+            return;
+        }
+
+        var updated = 0;
+        foreach (var chId in channelIds)
+        {
+            var discordChannel = _discord.GetChannel(chId) as ITextChannel;
+            if (discordChannel == null) continue;
+
+            var name = discordChannel.Name;
+            var topic = discordChannel.Topic;
+            var type = discordChannel is IThreadChannel ? "thread" : "text";
+
+            await _dbLock.WaitAsync();
+            try
+            {
+                using var c = CreateContext();
+                await c.Messages
+                    .Where(m => m.ChannelId == chId && m.ChannelName == null)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(m => m.ChannelName, name)
+                        .SetProperty(m => m.ChannelTopic, topic)
+                        .SetProperty(m => m.ChannelType, type));
+                updated++;
+            }
+            finally
+            {
+                _dbLock.Release();
+            }
+        }
+
+        _log.Info($"Updated metadata for {updated} channels in existing records.");
     }
 
     void QueueRetry(SocketTextChannel channel, ulong oldestMessageId)
@@ -389,7 +528,7 @@ public class MessageArchiveService
         {
             using var ctx = CreateContext();
             var bad = await ctx.Messages
-                .Where(m => m.Content.Length <= 2 || !char.IsLetter(m.Content[0]))
+                .Where(m => !IsArchiveWorthy(m.Content))
                 .ToListAsync();
             var count = bad.Count;
             if (count > 0)
@@ -405,11 +544,30 @@ public class MessageArchiveService
         }
     }
 
-    static bool ShouldArchiveContent(string content)
+    public async Task<DateTime?> GetLastUserMessageAsync(ulong guildId, ulong userId)
     {
-        if (string.IsNullOrEmpty(content)) return false;
-        if (content.Length <= 2) return false;
-        if (!char.IsLetter(content[0])) return false;
+        using var ctx = CreateContext();
+        var last = await ctx.Messages
+            .Where(m => m.GuildId == guildId && m.AuthorId == userId)
+            .OrderByDescending(m => m.Timestamp)
+            .FirstOrDefaultAsync();
+        return last?.Timestamp;
+    }
+
+    static bool IsArchiveWorthy(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        if (content.Length < 4) return false;
+
+        if (content.All(c => char.IsWhiteSpace(c) ||
+            char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.Format))
+            return false;
+
+        if (content.Length <= 6 && BotCommandPattern.IsMatch(content))
+            return false;
+
         return true;
     }
+
+    static bool ShouldArchiveContent(string content) => IsArchiveWorthy(content);
 }
