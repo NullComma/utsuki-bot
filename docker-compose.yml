@@ -12,4 +12,4 @@ services:
       ARCHIVE_GUILD_IDS: ${ARCHIVE_GUILD_IDS:-}
     volumes:
       - ./JsonData:/app/JsonData
-      - ./db:/app/db
+      - /var/lib/utsuki-bot/db:/app/db
