@@ -15,8 +15,8 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         _memory = memory;
     }
 
-    [SlashCommand("weekly", "Resumo das conversas da quinzena (últimos 14 dias)")]
-    public async Task Weekly([Summary("publico", "Postar no chat para todos verem?")] bool publico = false)
+    [SlashCommand("anteriormente", "Resumo do que rolou no servidor (últimos 15 dias)")]
+    public async Task Anteriormente([Summary("publico", "Postar no chat para todos verem?")] bool publico = false)
     {
         await DeferAsync(ephemeral: true);
         var guildId = Context.Guild?.Id ?? 0;
@@ -24,13 +24,14 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
 
         var result = await _memory.GenerateWeeklyAsync(guildId);
 
+        var title = $"Anteriormente em {Context.Guild.Name}";
         if (result.PublicMessageId.HasValue)
         {
-            await ReplyWithPublicLinkAsync("Resumo Quinzenal", "Este resumo já foi postado no canal hoje:", result, guildId, Color.Blue);
+            await ReplyWithPublicLinkAsync(title, "Este resumo já foi postado no canal hoje:", result, guildId, Color.Blue);
             return;
         }
 
-        var embed = BuildEmbed("Resumo Quinzenal", result.Summary, Color.Blue);
+        var embed = BuildEmbed(title, result.Summary, Color.Blue);
         if (publico && !IsPlaceholder(result.Summary))
         {
             var message = await FollowupAsync(embed: embed.Build(), ephemeral: false);
@@ -42,31 +43,33 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         }
     }
 
-    [SlashCommand("monthly", "Resumo das conversas do mês")]
-    public async Task Monthly([Summary("publico", "Postar no chat para todos verem?")] bool publico = false)
+    [SlashCommand("resumomes", "Resumo das conversas de um mês específico (formato MM/AAAA)")]
+    public async Task ResumoMes([Summary("mes", "Mês no formato MM/AAAA (ex.: 07/2026). Padrão: mês atual.")] string mes = "")
     {
         await DeferAsync(ephemeral: true);
         var guildId = Context.Guild?.Id ?? 0;
         if (guildId == 0) { await FollowupAsync("Comando apenas em servidor.", ephemeral: true); return; }
 
-        var result = await _memory.GenerateMonthlyAsync(guildId);
+        var now = DateTime.UtcNow;
+        int month = now.Month, year = now.Year;
 
-        if (result.PublicMessageId.HasValue)
+        if (!string.IsNullOrWhiteSpace(mes))
         {
-            await ReplyWithPublicLinkAsync("Resumo do Mês", "Este resumo já foi postado no canal hoje:", result, guildId, Color.Green);
-            return;
+            var match = System.Text.RegularExpressions.Regex.Match(mes.Trim(), @"^(0[1-9]|1[0-2])/(\d{4})$");
+            if (!match.Success)
+            {
+                await FollowupAsync("Formato inválido. Use MM/AAAA (ex.: 07/2026).", ephemeral: true);
+                return;
+            }
+            month = int.Parse(match.Groups[1].Value);
+            year = int.Parse(match.Groups[2].Value);
         }
 
-        var embed = BuildEmbed("Resumo do Mês", result.Summary, Color.Green);
-        if (publico && !IsPlaceholder(result.Summary))
-        {
-            var message = await FollowupAsync(embed: embed.Build(), ephemeral: false);
-            _memory.RegisterPublicMessage(guildId, "monthly", Context.Channel.Id, message.Id);
-        }
-        else
-        {
-            await FollowupAsync(embed: embed.Build(), ephemeral: true);
-        }
+        var result = await _memory.GenerateMonthAsync(guildId, month, year);
+        var monthName = new DateTime(year, month, 1).ToString("MMMM", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
+        var title = $"Resumo de {monthName} de {year}";
+        var embed = BuildEmbed(title, result.Summary, Color.Gold);
+        await FollowupAsync(embed: embed.Build(), ephemeral: true);
     }
 
     [SlashCommand("recap", "Resumo do que você perdeu desde sua última mensagem")]

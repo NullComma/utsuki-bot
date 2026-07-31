@@ -36,39 +36,50 @@ public class MemoryService
         _archive = archive;
     }
 
+    const int WeeklyLookbackDays = 15;
+    const int MinMessagesForSummary = 100;
+
     public async Task<MemoryResult> GenerateWeeklyAsync(ulong guildId)
     {
         var cached = GetCached(guildId, "weekly");
         if (cached != null)
             return ToResult(cached);
 
-        var since = DateTime.UtcNow.AddDays(-14);
+        var since = DateTime.UtcNow.AddDays(-WeeklyLookbackDays);
         var messages = await QueryMessagesAsync(guildId, since);
-        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada na quinzena." };
+        if (messages.Count < MinMessagesForSummary)
+            messages = await QueryMessagesAsync(guildId, null, take: MinMessagesForSummary);
+        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada." };
 
         var content = FormatMessages(messages);
-        var systemPrompt = $"Resuma as conversas dos últimos 14 dias (de {since:dd/MM/yyyy} até {DateTime.UtcNow:dd/MM/yyyy}) no servidor Discord em português. Destaque tópicos principais, decisões, discussões importantes. Seja conciso (máx 500 palavras).";
+        var range = messages.Count >= MinMessagesForSummary
+            ? $"últimos {WeeklyLookbackDays} dias, de {messages.Min(m => m.Timestamp):dd/MM/yyyy} até {messages.Max(m => m.Timestamp):dd/MM/yyyy}"
+            : $"as últimas {messages.Count} mensagens, de {messages.Min(m => m.Timestamp):dd/MM/yyyy} até {messages.Max(m => m.Timestamp):dd/MM/yyyy}";
+        var systemPrompt = BuildSummaryPrompt(range, 200, 8);
         var summary = await CallAIAsync(systemPrompt, content);
-        summary = AddUserMentions(summary, messages);
+        summary = Linkify(summary, messages);
         SaveCache(guildId, "weekly", summary);
         return new MemoryResult { Summary = summary };
     }
 
-    public async Task<MemoryResult> GenerateMonthlyAsync(ulong guildId)
+    public async Task<MemoryResult> GenerateMonthAsync(ulong guildId, int month, int year)
     {
-        var cached = GetCached(guildId, "monthly");
+        var cacheKey = $"month-{year:D4}-{month:D2}";
+        var cached = GetCached(guildId, cacheKey);
         if (cached != null)
             return ToResult(cached);
 
-        var since = DateTime.UtcNow.AddDays(-30);
-        var messages = await QueryMessagesAsync(guildId, since);
-        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada este mês." };
+        var start = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var end = start.AddMonths(1);
+        var messages = await QueryMessagesAsync(guildId, start, end);
+        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada neste mês." };
 
         var content = FormatMessages(messages);
-        var systemPrompt = $"Resuma as conversas do mês (últimos 30 dias, de {since:dd/MM/yyyy} até {DateTime.UtcNow:dd/MM/yyyy}) no servidor Discord em português. Destaque tópicos principais, decisões, discussões importantes. Seja conciso (máx 500 palavras).";
+        var monthName = start.ToString("MMMM", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
+        var systemPrompt = BuildSummaryPrompt($"{monthName} de {year} ({start:dd/MM/yyyy} até {end.AddDays(-1):dd/MM/yyyy})", 250, 10);
         var summary = await CallAIAsync(systemPrompt, content);
-        summary = AddUserMentions(summary, messages);
-        SaveCache(guildId, "monthly", summary);
+        summary = Linkify(summary, messages);
+        SaveCache(guildId, cacheKey, summary);
         return new MemoryResult { Summary = summary };
     }
 
@@ -83,9 +94,9 @@ public class MemoryService
         if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem nova desde sua última mensagem." };
 
         var content = FormatMessages(messages);
-        var systemPrompt = $"Resuma as conversas que o usuário perdeu desde {since:dd/MM/yyyy HH:mm} no servidor Discord em português. Destaque tópicos principais, discussões. Seja conciso (máx 400 palavras).";
+        var systemPrompt = BuildSummaryPrompt($"desde {since:dd/MM/yyyy HH:mm}", 150, 6);
         var summary = await CallAIAsync(systemPrompt, content);
-        return new MemoryResult { Summary = AddUserMentions(summary, messages) };
+        return new MemoryResult { Summary = Linkify(summary, messages) };
     }
 
     public void RegisterPublicMessage(ulong guildId, string periodType, ulong channelId, ulong messageId)
@@ -139,17 +150,25 @@ public class MemoryService
         _cache[(guildId, periodType)] = new CacheEntry(summary, DateTime.UtcNow.ToString("yyyy-MM-dd"), null, null);
     }
 
-    async Task<List<MessageRecord>> QueryMessagesAsync(ulong guildId, DateTime since, ulong? excludeUserId = null)
+    async Task<List<MessageRecord>> QueryMessagesAsync(ulong guildId, DateTime? since = null, DateTime? until = null, int take = 500, ulong? excludeUserId = null)
     {
         using var ctx = CreateContext();
         var query = ctx.Messages
-            .Where(m => m.GuildId == guildId && m.Timestamp >= since)
-            .OrderBy(m => m.Timestamp);
+            .Where(m => m.GuildId == guildId);
 
+        if (since.HasValue)
+            query = query.Where(m => m.Timestamp >= since.Value);
+        if (until.HasValue)
+            query = query.Where(m => m.Timestamp < until.Value);
         if (excludeUserId.HasValue)
-            query = (IOrderedQueryable<MessageRecord>)query.Where(m => m.AuthorId != excludeUserId.Value);
+            query = query.Where(m => m.AuthorId != excludeUserId.Value);
 
-        return await query.Take(500).ToListAsync();
+        var result = await query
+            .OrderByDescending(m => m.Timestamp)
+            .Take(take)
+            .ToListAsync();
+        result.Reverse();
+        return result;
     }
 
     static string FormatMessages(List<MessageRecord> messages)
@@ -164,6 +183,45 @@ public class MemoryService
         return sb.ToString();
     }
 
+    static string Linkify(string summary, IEnumerable<MessageRecord> messages)
+    {
+        if (string.IsNullOrWhiteSpace(summary)) return summary;
+
+        summary = NormalizeInvisible(summary);
+
+        var channels = messages
+            .Where(m => m.ChannelId != 0)
+            .GroupBy(m => m.ChannelId)
+            .Select(g => new { Name = g.First().ChannelName, Id = g.Key })
+            .OrderByDescending(c => c.Name?.Length ?? 0)
+            .ToList();
+
+        foreach (var channel in channels)
+        {
+            summary = Regex.Replace(summary, $@"(?<![A-Za-z0-9_])ch:{channel.Id}(?!\d)", $"<#{channel.Id}>");
+            summary = Regex.Replace(summary, $@"(?<![\d<])#{channel.Id}(?!\d)", $"<#{channel.Id}>");
+        }
+
+        summary = AddUserMentions(summary, messages);
+        summary = AddChannelMentions(summary, messages);
+
+        if (summary.Length > 4000)
+            summary = summary[..3997] + "...";
+        return summary;
+    }
+
+    static string NormalizeInvisible(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            if (ch is '\u200B' or '\u200C' or '\u200D' or '\u2060' or '\uFE0F' or '\uFEFF' or '\u00AD')
+                continue;
+            sb.Append(ch);
+        }
+        return sb.ToString();
+    }
+
     static string AddUserMentions(string summary, IEnumerable<MessageRecord> messages)
     {
         if (string.IsNullOrWhiteSpace(summary)) return summary;
@@ -171,8 +229,8 @@ public class MemoryService
         var authors = messages
             .Where(m => !string.IsNullOrWhiteSpace(m.AuthorName))
             .GroupBy(m => m.AuthorId)
-            .Select(g => new { Name = g.First().AuthorName!, Id = g.Key })
-            .Where(a => a.Name.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.' or '-'))
+            .Select(g => new { Name = NormalizeInvisible(g.First().AuthorName!), Id = g.Key })
+            .Where(a => !string.IsNullOrWhiteSpace(a.Name) && a.Name.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.' or '-'))
             .OrderByDescending(a => a.Name.Length)
             .ToList();
 
@@ -180,15 +238,62 @@ public class MemoryService
         {
             summary = Regex.Replace(
                 summary,
-                $@"\b{Regex.Escape(author.Name)}\b",
+                $@"(?<![\p{{L}}\p{{Nd}}_])@{Regex.Escape(author.Name)}(?![\p{{L}}\p{{Nd}}@#_])",
+                $"<@{author.Id}>",
+                RegexOptions.IgnoreCase
+            );
+
+            summary = Regex.Replace(
+                summary,
+                $@"(?<![\p{{L}}\p{{Nd}}@]){Regex.Escape(author.Name)}(?![\p{{L}}\p{{Nd}}@#_])",
                 $"<@{author.Id}>",
                 RegexOptions.IgnoreCase
             );
         }
 
-        if (summary.Length > 4000)
-            summary = summary[..3997] + "...";
         return summary;
+    }
+
+    static string AddChannelMentions(string summary, IEnumerable<MessageRecord> messages)
+    {
+        if (string.IsNullOrWhiteSpace(summary)) return summary;
+
+        var channels = messages
+            .Where(m => !string.IsNullOrWhiteSpace(m.ChannelName))
+            .GroupBy(m => m.ChannelId)
+            .Select(g => new { Name = NormalizeInvisible(g.First().ChannelName!), Id = g.Key })
+            .Where(c => !string.IsNullOrWhiteSpace(c.Name))
+            .OrderByDescending(c => c.Name.Length)
+            .ToList();
+
+        foreach (var channel in channels)
+        {
+            summary = Regex.Replace(
+                summary,
+                $@"(?<![\p{{L}}\p{{Nd}}_])#{Regex.Escape(channel.Name)}(?![\p{{L}}\p{{Nd}}@#_])",
+                $"<#{channel.Id}>",
+                RegexOptions.IgnoreCase
+            );
+
+            summary = Regex.Replace(
+                summary,
+                $@"(?<![\p{{L}}\p{{Nd}}#]){Regex.Escape(channel.Name)}(?![\p{{L}}\p{{Nd}}@#_])",
+                $"<#{channel.Id}>",
+                RegexOptions.IgnoreCase
+            );
+        }
+
+        return summary;
+    }
+
+    static string BuildSummaryPrompt(string range, int maxWords, int maxBullets)
+    {
+        return $"Resuma as conversas do servidor Discord referentes a {range}, em português. " +
+               $"Formato: apenas bullets curtos e diretos, no estilo recapitulação de série, sem cabeçalhos, sem subtítulos, sem listas aninhadas. " +
+               $"Regras: máximo {maxBullets} bullets e {maxWords} palavras no total; frases curtas e objetivas; " +
+               $"sem floreios, sem adjetivos, sem emojis, sem markdown além dos bullets. " +
+               $"Cite sempre os nomes de usuários exatamente como aparecem no histórico (ex.: Fulano, Beltrano) " +
+               $"e os canais como aparecem (ex.: geral, off-topic), para que os links de menção funcionem.";
     }
 
     async Task<string> CallAIAsync(string systemPrompt, string userContent)

@@ -9,8 +9,7 @@ namespace App.Services;
 [Service]
 public class ScheduledMemoryService
 {
-    const int WeeklyIntervalDays = 14;
-    const int MonthlyIntervalDays = 31;
+    const int WeeklyIntervalDays = 15;
     const int LastMessagesCheck = 3;
 
     readonly DiscordSocketClient _discord;
@@ -72,25 +71,10 @@ public class ScheduledMemoryService
             var result = await _memory.GenerateWeeklyAsync(guild.Id);
             if (!IsPlaceholder(result.Summary))
             {
-                var embed = BuildEmbed("Resumo Quinzenal", result.Summary, Color.Blue);
+                var embed = BuildEmbed($"Anteriormente em {guild.Name}", result.Summary, Color.Blue);
                 var msg = await channel.SendMessageAsync(embed: embed.Build());
                 _memory.RegisterPublicMessage(guild.Id, "weekly", channel.Id, msg.Id);
                 await _memory.RecordAutoPostAsync(guild.Id, "weekly", now);
-            }
-        }
-
-        var lastMonthly = await _memory.GetLastAutoPostAsync(guild.Id, "monthly");
-        if ((lastMonthly == null || now - lastMonthly.Value >= TimeSpan.FromDays(MonthlyIntervalDays)) &&
-            !await IsLastMessagesFromBotAsync(channel))
-        {
-            _log.Info($"Posting monthly summary in #{channel.Name} ({guild.Name})");
-            var result = await _memory.GenerateMonthlyAsync(guild.Id);
-            if (!IsPlaceholder(result.Summary))
-            {
-                var embed = BuildEmbed("Resumo do Mês", result.Summary, Color.Green);
-                var msg = await channel.SendMessageAsync(embed: embed.Build());
-                _memory.RegisterPublicMessage(guild.Id, "monthly", channel.Id, msg.Id);
-                await _memory.RecordAutoPostAsync(guild.Id, "monthly", now);
             }
         }
     }
