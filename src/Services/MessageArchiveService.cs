@@ -301,7 +301,7 @@ public class MessageArchiveService
             }
             catch (Exception e)
             {
-                _log.Warning($"Fetch error #{channel.Name}: {e.Message}. Retry in {fetchDelay}s.");
+                _log.Warning($"Fetch error #{channel.Name}: {e}. Retry in {fetchDelay}s.");
                 await Task.Delay(TimeSpan.FromSeconds(fetchDelay));
                 fetchDelay = Math.Min(fetchDelay * 2, 60);
                 continue;

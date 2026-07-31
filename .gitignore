@@ -409,3 +409,4 @@ FodyWeavers.xsd
 # End of https://www.toptal.com/developers/gitignore/api/csharp
 .idea
 Properties/launchSettings.json
+.env.stage
