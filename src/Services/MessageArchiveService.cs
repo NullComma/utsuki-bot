@@ -167,8 +167,8 @@ public class MessageArchiveService
                 ChannelTopic = channel is ITextChannel ttc ? ttc.Topic : null,
                 ChannelType = channel switch
                 {
-                    ITextChannel _ => "text",
                     IThreadChannel _ => "thread",
+                    ITextChannel _ => "text",
                     IDMChannel _ => "dm",
                     _ => "unknown"
                 },
@@ -339,7 +339,7 @@ public class MessageArchiveService
                     ChannelTopic = channel.Topic,
                     ChannelType = "text",
                     MessageType = msg.Reference is not null ? "reply" : "normal",
-                    ReferenceMessageId = msg.Reference?.MessageId
+                    ReferenceMessageId = msg.Reference is { MessageId.IsSpecified: true } ? msg.Reference.MessageId.Value : null
                 });
             }
 

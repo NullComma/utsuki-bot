@@ -59,7 +59,12 @@ internal static class Program {
             settings.MainGuildId = ulong.TryParse(Configuration["MAIN_GUILD_ID"], out var mgid) ? mgid : 264800866169651203; // Concord
             settings.GgjGuildId = ulong.TryParse(Configuration["GGJ_GUILD_ID"], out var ggid) ? ggid : default;
             var archiveIds = Configuration["ARCHIVE_GUILD_IDS"];
-            if (!string.IsNullOrWhiteSpace(archiveIds))
+            if (string.IsNullOrWhiteSpace(archiveIds))
+            {
+                var section = Configuration.GetSection("ArchiveGuildIds");
+                settings.ArchiveGuildIds = section.Get<List<ulong>>() ?? new List<ulong>();
+            }
+            else
             {
                 settings.ArchiveGuildIds = archiveIds
                     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
