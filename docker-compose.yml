@@ -5,7 +5,7 @@ services:
     restart: always
     environment:
       DISCORD_TOKEN_UTSUKI: ${DISCORD_TOKEN_UTSUKI}
-      AI_ENDPOINT: ${AI_ENDPOINT}
+      AI_ENDPOINT: ${AI_ENDPOINT:-https://ai.nullcomma.com}
       AI_TOKEN: ${AI_TOKEN}
       API_KEY_WEATHER: ${API_KEY_WEATHER}
       BOT_VERSION: ${BOT_VERSION}
