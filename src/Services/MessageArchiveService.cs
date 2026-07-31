@@ -124,6 +124,14 @@ public class MessageArchiveService
 
         AddIndex("CREATE INDEX IF NOT EXISTS IX_Messages_Timestamp ON Messages(Timestamp)");
         AddIndex("CREATE INDEX IF NOT EXISTS IX_Messages_AuthorId_Timestamp ON Messages(AuthorId, Timestamp)");
+
+        AddIndex(@"CREATE TABLE IF NOT EXISTS MemoryPosts (
+            Id INTEGER NOT NULL CONSTRAINT PK_MemoryPosts PRIMARY KEY AUTOINCREMENT,
+            GuildId INTEGER NOT NULL,
+            PostType TEXT NOT NULL,
+            LastPostedAt TEXT NOT NULL
+        )");
+        AddIndex("CREATE UNIQUE INDEX IF NOT EXISTS IX_MemoryPosts_GuildId_PostType ON MemoryPosts(GuildId, PostType)");
     }
 
     public void Start()

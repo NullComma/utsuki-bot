@@ -15,7 +15,7 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         _memory = memory;
     }
 
-    [SlashCommand("weekly", "Resumo das conversas da semana")]
+    [SlashCommand("weekly", "Resumo das conversas da quinzena (últimos 14 dias)")]
     public async Task Weekly([Summary("publico", "Postar no chat para todos verem?")] bool publico = false)
     {
         await DeferAsync(ephemeral: true);
@@ -26,11 +26,11 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
 
         if (result.PublicMessageId.HasValue)
         {
-            await ReplyWithPublicLinkAsync("Resumo da Semana", "Este resumo já foi postado no canal hoje:", result, guildId, Color.Blue);
+            await ReplyWithPublicLinkAsync("Resumo Quinzenal", "Este resumo já foi postado no canal hoje:", result, guildId, Color.Blue);
             return;
         }
 
-        var embed = BuildEmbed("Resumo da Semana", result.Summary, Color.Blue);
+        var embed = BuildEmbed("Resumo Quinzenal", result.Summary, Color.Blue);
         if (publico && !IsPlaceholder(result.Summary))
         {
             var message = await FollowupAsync(embed: embed.Build(), ephemeral: false);

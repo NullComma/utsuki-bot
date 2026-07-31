@@ -110,5 +110,27 @@ namespace App.Modules {
 		}
 
 		#endregion <<---------- Dynamic Voice ---------->>
+
+		#region <<---------- Main Channel ---------->>
+
+		[SlashCommand("setmainchannel", "Set the current channel as the main channel for automatic memory summaries.")]
+		[RequireUserPermission(GuildPermission.Administrator)]
+		public async Task SetMainChannel() {
+			var path = $"{GuildSettingsService.PATH_PREFIX}{Context.Guild.Id}";
+			var guildSettings = JsonCache.LoadFromJson<GuildSettings>(path) ?? new GuildSettings();
+
+			guildSettings.MainTextChannelId = Context.Channel.Id;
+			JsonCache.SaveToJson(path, guildSettings);
+
+			var embed = new EmbedBuilder {
+				Title = "Main channel set to",
+				Description = $"{(Context.Channel as SocketTextChannel)?.Mention ?? Context.Channel.Name}",
+				Color = Color.Green
+			};
+
+			await RespondAsync(embed: embed.Build(), ephemeral: true);
+		}
+
+		#endregion <<---------- Main Channel ---------->>
 	}
 }

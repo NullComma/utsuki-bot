@@ -42,12 +42,12 @@ public class MemoryService
         if (cached != null)
             return ToResult(cached);
 
-        var since = DateTime.UtcNow.AddDays(-7);
+        var since = DateTime.UtcNow.AddDays(-14);
         var messages = await QueryMessagesAsync(guildId, since);
-        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada esta semana." };
+        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada na quinzena." };
 
         var content = FormatMessages(messages);
-        var systemPrompt = $"Resuma as conversas da semana (últimos 7 dias, de {since:dd/MM/yyyy} até {DateTime.UtcNow:dd/MM/yyyy}) no servidor Discord em português. Destaque tópicos principais, decisões, discussões importantes. Seja conciso (máx 500 palavras).";
+        var systemPrompt = $"Resuma as conversas dos últimos 14 dias (de {since:dd/MM/yyyy} até {DateTime.UtcNow:dd/MM/yyyy}) no servidor Discord em português. Destaque tópicos principais, decisões, discussões importantes. Seja conciso (máx 500 palavras).";
         var summary = await CallAIAsync(systemPrompt, content);
         summary = AddUserMentions(summary, messages);
         SaveCache(guildId, "weekly", summary);
@@ -92,6 +92,30 @@ public class MemoryService
     {
         if (_cache.TryGetValue((guildId, periodType), out var entry))
             _cache[(guildId, periodType)] = entry with { PublicChannelId = channelId, PublicMessageId = messageId };
+    }
+
+    public async Task<DateTime?> GetLastAutoPostAsync(ulong guildId, string postType)
+    {
+        using var ctx = CreateContext();
+        var post = await ctx.MemoryPosts
+            .FirstOrDefaultAsync(p => p.GuildId == guildId && p.PostType == postType);
+        return post?.LastPostedAt;
+    }
+
+    public async Task RecordAutoPostAsync(ulong guildId, string postType, DateTime when)
+    {
+        using var ctx = CreateContext();
+        var post = await ctx.MemoryPosts
+            .FirstOrDefaultAsync(p => p.GuildId == guildId && p.PostType == postType);
+        if (post == null)
+        {
+            ctx.MemoryPosts.Add(new MemoryPost { GuildId = guildId, PostType = postType, LastPostedAt = when });
+        }
+        else
+        {
+            post.LastPostedAt = when;
+        }
+        await ctx.SaveChangesAsync();
     }
 
     static MemoryResult ToResult(CacheEntry entry) => new()

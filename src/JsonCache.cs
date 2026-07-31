@@ -10,7 +10,7 @@ public static class JsonCache {
 
 	#region <<---------- Properties ---------->>
 
-	const string ROOT_FOLDER = "../JsonData/";
+	const string ROOT_FOLDER = "JsonData/";
 
 	public static readonly JsonSerializerSettings DefaultSerializer = new() {
 		Culture = CultureInfo.InvariantCulture,

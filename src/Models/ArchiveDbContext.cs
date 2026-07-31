@@ -5,6 +5,7 @@ namespace App.Models;
 public class ArchiveDbContext : DbContext
 {
     public DbSet<MessageRecord> Messages => Set<MessageRecord>();
+    public DbSet<MemoryPost> MemoryPosts => Set<MemoryPost>();
 
     public ArchiveDbContext() { }
 
@@ -22,6 +23,13 @@ public class ArchiveDbContext : DbContext
             entity.HasIndex(e => e.MessageId).IsUnique();
             entity.HasIndex(e => e.Timestamp);
             entity.HasIndex(e => new { e.AuthorId, e.Timestamp });
+        });
+
+        modelBuilder.Entity<MemoryPost>(entity =>
+        {
+            entity.ToTable("MemoryPosts");
+
+            entity.HasIndex(e => new { e.GuildId, e.PostType }).IsUnique();
         });
     }
 }

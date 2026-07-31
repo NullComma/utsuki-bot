@@ -55,4 +55,9 @@ public class GuildSettings {
 	/// </summary>
 	public ulong? BotLogsTextChannelId { get; set; }
 
+	/// <summary>
+	/// Main text channel of the guild (used for automatic memory summaries).
+	/// </summary>
+	public ulong? MainTextChannelId { get; set; }
+
 }
