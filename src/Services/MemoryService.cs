@@ -2,7 +2,6 @@ using App.Attributes;
 using App.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -12,17 +11,11 @@ namespace App.Services;
 public class MemoryResult
 {
     public string Summary { get; set; } = string.Empty;
-    public ulong? PublicMessageChannelId { get; set; }
-    public ulong? PublicMessageId { get; set; }
 }
 
 [Service]
 public class MemoryService
 {
-    record CacheEntry(string Summary, string CacheDate, ulong? PublicChannelId, ulong? PublicMessageId);
-
-    static readonly ConcurrentDictionary<(ulong GuildId, string PeriodType), CacheEntry> _cache = new();
-
     readonly LoggingService _log;
     readonly BotSettings _settings;
     readonly IHttpClientFactory _httpClientFactory;
@@ -41,10 +34,6 @@ public class MemoryService
 
     public async Task<MemoryResult> GenerateWeeklyAsync(ulong guildId)
     {
-        var cached = GetCached(guildId, "weekly");
-        if (cached != null)
-            return ToResult(cached);
-
         var since = DateTime.UtcNow.AddDays(-WeeklyLookbackDays);
         var messages = await QueryMessagesAsync(guildId, since);
         if (messages.Count < MinMessagesForSummary)
@@ -58,17 +47,11 @@ public class MemoryService
         var systemPrompt = BuildSummaryPrompt(range, 200, 8);
         var summary = await CallAIAsync(systemPrompt, content);
         summary = Linkify(summary, messages);
-        SaveCache(guildId, "weekly", summary);
         return new MemoryResult { Summary = summary };
     }
 
     public async Task<MemoryResult> GenerateMonthAsync(ulong guildId, int month, int year)
     {
-        var cacheKey = $"month-{year:D4}-{month:D2}";
-        var cached = GetCached(guildId, cacheKey);
-        if (cached != null)
-            return ToResult(cached);
-
         var start = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = start.AddMonths(1);
         var messages = await QueryMessagesAsync(guildId, start, end);
@@ -79,7 +62,6 @@ public class MemoryService
         var systemPrompt = BuildSummaryPrompt($"{monthName} de {year} ({start:dd/MM/yyyy} até {end.AddDays(-1):dd/MM/yyyy})", 250, 10);
         var summary = await CallAIAsync(systemPrompt, content);
         summary = Linkify(summary, messages);
-        SaveCache(guildId, cacheKey, summary);
         return new MemoryResult { Summary = summary };
     }
 
@@ -97,12 +79,6 @@ public class MemoryService
         var systemPrompt = BuildSummaryPrompt($"desde {since:dd/MM/yyyy HH:mm}", 150, 6);
         var summary = await CallAIAsync(systemPrompt, content);
         return new MemoryResult { Summary = Linkify(summary, messages) };
-    }
-
-    public void RegisterPublicMessage(ulong guildId, string periodType, ulong channelId, ulong messageId)
-    {
-        if (_cache.TryGetValue((guildId, periodType), out var entry))
-            _cache[(guildId, periodType)] = entry with { PublicChannelId = channelId, PublicMessageId = messageId };
     }
 
     public async Task<DateTime?> GetLastAutoPostAsync(ulong guildId, string postType)
@@ -127,27 +103,6 @@ public class MemoryService
             post.LastPostedAt = when;
         }
         await ctx.SaveChangesAsync();
-    }
-
-    static MemoryResult ToResult(CacheEntry entry) => new()
-    {
-        Summary = entry.Summary,
-        PublicMessageChannelId = entry.PublicChannelId,
-        PublicMessageId = entry.PublicMessageId
-    };
-
-    static CacheEntry? GetCached(ulong guildId, string periodType)
-    {
-        var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        if (_cache.TryGetValue((guildId, periodType), out var entry) && entry.CacheDate == today)
-            return entry;
-        return null;
-    }
-
-    static void SaveCache(ulong guildId, string periodType, string summary)
-    {
-        if (string.IsNullOrWhiteSpace(summary) || summary.StartsWith("Erro")) return;
-        _cache[(guildId, periodType)] = new CacheEntry(summary, DateTime.UtcNow.ToString("yyyy-MM-dd"), null, null);
     }
 
     async Task<List<MessageRecord>> QueryMessagesAsync(ulong guildId, DateTime? since = null, DateTime? until = null, int take = 500, ulong? excludeUserId = null)

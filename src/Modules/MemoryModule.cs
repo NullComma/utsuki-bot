@@ -2,6 +2,7 @@ using App.Services;
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
+using System.Text.RegularExpressions;
 
 namespace App.Modules;
 
@@ -23,23 +24,15 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         if (guildId == 0) { await FollowupAsync("Comando apenas em servidor.", ephemeral: true); return; }
 
         var result = await _memory.GenerateWeeklyAsync(guildId);
-
         var title = $"Anteriormente em {Context.Guild.Name}";
-        if (result.PublicMessageId.HasValue)
-        {
-            await ReplyWithPublicLinkAsync(title, "Este resumo já foi postado no canal hoje:", result, guildId, Color.Blue);
-            return;
-        }
-
         var embed = BuildEmbed(title, result.Summary, Color.Blue);
+
         if (publico && !IsPlaceholder(result.Summary))
-        {
-            var message = await FollowupAsync(embed: embed.Build(), ephemeral: false);
-            _memory.RegisterPublicMessage(guildId, "weekly", Context.Channel.Id, message.Id);
-        }
+            await FollowupAsync(embed: embed.Build(), ephemeral: false);
         else
         {
-            await FollowupAsync(embed: embed.Build(), ephemeral: true);
+            var embedPrivate = BuildEmbed(title, DeLinkify(result.Summary), Color.Blue);
+            await FollowupAsync(embed: embedPrivate.Build(), ephemeral: true);
         }
     }
 
@@ -55,7 +48,7 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
 
         if (!string.IsNullOrWhiteSpace(mes))
         {
-            var match = System.Text.RegularExpressions.Regex.Match(mes.Trim(), @"^(0[1-9]|1[0-2])/(\d{4})$");
+            var match = Regex.Match(mes.Trim(), @"^(0[1-9]|1[0-2])/(\d{4})$");
             if (!match.Success)
             {
                 await FollowupAsync("Formato inválido. Use MM/AAAA (ex.: 07/2026).", ephemeral: true);
@@ -68,7 +61,7 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         var result = await _memory.GenerateMonthAsync(guildId, month, year);
         var monthName = new DateTime(year, month, 1).ToString("MMMM", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
         var title = $"Resumo de {monthName} de {year}";
-        var embed = BuildEmbed(title, result.Summary, Color.Gold);
+        var embed = BuildEmbed(title, DeLinkify(result.Summary), Color.Gold);
         await FollowupAsync(embed: embed.Build(), ephemeral: true);
     }
 
@@ -80,24 +73,25 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         if (guildId == 0) { await FollowupAsync("Comando apenas em servidor.", ephemeral: true); return; }
 
         var result = await _memory.GenerateRecapAsync(guildId, Context.User.Id);
-        var embed = BuildEmbed("Você Perdeu", result.Summary, Color.Purple);
+        var embed = BuildEmbed("Você Perdeu", DeLinkify(result.Summary), Color.Purple);
         await FollowupAsync(embed: embed.Build(), ephemeral: true);
     }
 
-    async Task ReplyWithPublicLinkAsync(string title, string message, MemoryResult result, ulong guildId, Color color)
+    string DeLinkify(string summary)
     {
-        var embed = BuildEmbed(title, message, color);
-        embed.Description += $"\n\nVocê pode ver o resumo na mensagem enviada no canal:";
-        embed.Footer = new EmbedFooterBuilder { Text = "Gerado por IA" };
+        if (string.IsNullOrWhiteSpace(summary) || Context.Guild == null) return summary;
 
-        var jumpUrl = $"https://discord.com/channels/{guildId}/{result.PublicMessageChannelId}/{result.PublicMessageId}";
-        var button = new ButtonBuilder()
-            .WithLabel("Ver no canal")
-            .WithStyle(ButtonStyle.Link)
-            .WithUrl(jumpUrl);
-        var components = new ComponentBuilder().WithButton(button).Build();
-
-        await FollowupAsync(embed: embed.Build(), components: components, ephemeral: true);
+        summary = Regex.Replace(summary, @"<@(\d+)>", m =>
+        {
+            var user = Context.Guild.GetUser(ulong.Parse(m.Groups[1].Value));
+            return user != null ? $"@{user.DisplayName}" : m.Value;
+        });
+        summary = Regex.Replace(summary, @"<#(\d+)>", m =>
+        {
+            var channel = Context.Guild.GetChannel(ulong.Parse(m.Groups[1].Value));
+            return channel != null ? $"#{channel.Name}" : m.Value;
+        });
+        return summary;
     }
 
     static EmbedBuilder BuildEmbed(string title, string description, Color color) => new()

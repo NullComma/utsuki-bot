@@ -72,8 +72,7 @@ public class ScheduledMemoryService
             if (!IsPlaceholder(result.Summary))
             {
                 var embed = BuildEmbed($"Anteriormente em {guild.Name}", result.Summary, Color.Blue);
-                var msg = await channel.SendMessageAsync(embed: embed.Build());
-                _memory.RegisterPublicMessage(guild.Id, "weekly", channel.Id, msg.Id);
+                await channel.SendMessageAsync(embed: embed.Build());
                 await _memory.RecordAutoPostAsync(guild.Id, "weekly", now);
             }
         }
