@@ -3,7 +3,6 @@ using Discord.WebSocket;
 using App.Extensions;
 using App.Services;
 using Discord.Interactions;
-using RestSharp;
 
 namespace App.Modules {
 
@@ -52,22 +51,6 @@ namespace App.Modules {
             await RespondAsync($"Canal de voz renomeado para: {newName}");
         }
 
-        [SlashCommand("randomimg", "Get random image from picsum")]
-        public async Task GetRandomImg(int desiredResolution)
-        {
-            await DeferAsync();
-            var client = new RestClient();
-            var timeline = await client.ExecuteAsync(new RestRequest($"https://picsum.photos/{desiredResolution}", Method.Get));
-
-            var embed = new EmbedBuilder {
-                Title = "Random image",
-                Description = "from picsum.photos",
-                ThumbnailUrl = timeline.ResponseUri.OriginalString
-            };
-
-            await FollowupAsync(embed: embed.Build());
-        }
-
         [SlashCommand("deletelastmessages", "Delete a number of messages in current channel")]
         [RequireUserPermission(GuildPermission.Administrator)]
         [RequireBotPermission(ChannelPermission.ManageMessages)]
@@ -75,21 +58,6 @@ namespace App.Modules {
         public async Task DeleteLastMessages(int limit) {
             await RespondAsync($"Deletando as últimas {limit} mensagens...", ephemeral: true);
             await _moderatorService.DeleteLastMessages(Context, limit);
-        }
-
-
-        [SlashCommand("getchannelinfo", "Get a channel name by id")]
-        [RequireBotPermission(GuildPermission.ManageChannels)]
-        [RequireUserPermission(GuildPermission.Administrator)]
-        public async Task GetTextChannelInfo(ulong channelId) {
-            var channel = Context.Guild.GetChannel(channelId);
-            if (channel == null) {
-                await RespondAsync("nao achei canal com esse id", ephemeral: true);
-                return;
-            }
-
-            await RespondAsync($"nome do canal: {channel.Name}");
-
         }
 
     }

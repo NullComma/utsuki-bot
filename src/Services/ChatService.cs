@@ -67,7 +67,6 @@ public class ChatService : IDisposable {
 	readonly IConfigurationRoot _config;
 	readonly GuildSettingsService _guildSettings;
 	readonly Random _rand = new();
-	Dictionary<ulong, List<ulong>> LastMessagesIdsInChannel = new();
 
 	System.Timers.Timer _bumpTimer;
 	int _previousHour = -1;
@@ -499,105 +498,6 @@ public class ChatService : IDisposable {
 
 
 	#region <<---------- Chat Messages ---------->>
-
-	public async Task GetAndRepplyRememberMessage(SocketInteractionContext context, int amount, bool downloadIfNeeded) {
-		await UpdateMessagesCacheForChannel(context.Channel, amount, downloadIfNeeded);
-		var channelId = context.Channel.Id;
-		SerializeMessages(LastMessagesIdsInChannel[channelId], channelId.ToString());
-
-		var selectedMsg = await GetRandomUserMessageFromChannelCache(context.Channel, 7);
-		if (selectedMsg == null) return;
-		if (selectedMsg is not IUserMessage userMsg) return;
-
-		var time = DateTime.UtcNow - selectedMsg.Timestamp;
-
-		var embed = new EmbedBuilder {
-			Title = $"{time.TotalDays:0} dias atrás",
-			Description = selectedMsg.Content,
-			ThumbnailUrl = selectedMsg.Author.GetAvatarUrl() ?? selectedMsg.Author.GetDefaultAvatarUrl()
-		};
-
-		await userMsg.ReplyAsync($"Lembrança de **{userMsg.Author.Mention}**",false,embed.Build(), AllowedMentions.None);
-	}
-
-	public async Task UpdateMessagesCacheForChannel(ISocketMessageChannel channel, int ammount, bool downloadIfNeeded) {
-		var key = channel.Id;
-
-		if (!downloadIfNeeded && LastMessagesIdsInChannel.ContainsKey(key)) {
-			return;
-		}
-
-		UpdateCachedMsgsIdForChannelFromLocal(channel.Id);
-
-		if (!downloadIfNeeded) {
-			return;
-		}
-
-		var allMsgs = channel.GetMessagesAsync(ammount).GetAsyncEnumerator();
-
-		while (await allMsgs.MoveNextAsync()) {
-			var list = LastMessagesIdsInChannel[key];
-			list.AddRange(allMsgs.Current.Select(e=>e.Id));
-			_log.Info($"Including {allMsgs.Current.Count} messages on list of {list.Count} messages in '{channel.Name}'");
-			LastMessagesIdsInChannel[key] = list.Distinct().ToList();
-		}
-
-	}
-
-	async Task<IMessage> GetRandomUserMessageFromChannelCache(ISocketMessageChannel channel, int minimumDays) {
-		if (channel == null) return null;
-		var listOfMessages = LastMessagesIdsInChannel[channel.Id];
-
-		int maxTries = 10000;
-
-		do {
-			var selectedId = listOfMessages.RandomElement();
-			var msg = await channel.GetMessageAsync(selectedId);
-			if (msg is RestUserMessage m) {
-				var mResolved = m.Resolve(0,
-					TagHandling.Remove, TagHandling.Remove,
-					TagHandling.Remove, TagHandling.Ignore,
-					TagHandling.Ignore
-				);
-
-				bool isValidMsg = !m.Author.IsBot
-				                  && !m.Author.IsWebhook
-				                  && !string.IsNullOrEmpty(mResolved)
-				                  && (DateTime.UtcNow - m.Timestamp) > TimeSpan.FromDays(minimumDays)
-				                  && mResolved[0] != ','
-				                  && mResolved[0] != '<'
-				                  && mResolved[0] != 'h'
-				                  && mResolved.Length > 5;
-
-				if (isValidMsg) {
-					LastMessagesIdsInChannel[channel.Id] = listOfMessages;
-					return m;
-				}
-			}
-
-			// not valid, continue searching
-			listOfMessages.Remove(selectedId);
-			maxTries--;
-		} while (maxTries > 0);
-
-		_log.Info("Could not find valid message from channel cache.");
-		return null;
-	}
-
-	const string CHANNEL_MSGS_PATH = "Backup/ChannelMessagesIds/";
-	void UpdateCachedMsgsIdForChannelFromLocal(ulong channelId) {
-		var cachedJson = JsonCache.LoadFromJson<JArray>(CHANNEL_MSGS_PATH + channelId.ToString());
-		if (cachedJson == null) {
-			LastMessagesIdsInChannel[channelId] = new List<ulong>();
-			return;
-		}
-		var list = cachedJson.Select(e=>e.Value<ulong>()).ToList();
-		LastMessagesIdsInChannel[channelId] = list;
-	}
-
-	void SerializeMessages(List<ulong> messagesIds, string fileName) {
-		JsonCache.SaveToJson($"{CHANNEL_MSGS_PATH}{fileName}", messagesIds);
-	}
 
 	#endregion <<---------- Chat Messages ---------->>
 

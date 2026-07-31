@@ -53,7 +53,29 @@ public class InteractionHandler
     {
         await _client.SetGameAsync($"v{Program.VERSION} | chrisjogos.com", type: ActivityType.CustomStatus);
 
+        await CleanupOrphanedGuildCommandsAsync();
         await _handler.RegisterCommandsGloballyAsync();
+    }
+
+    async Task CleanupOrphanedGuildCommandsAsync()
+    {
+        try
+        {
+            foreach (var guild in _client.Guilds)
+            {
+                var guildCommands = await guild.GetApplicationCommandsAsync();
+                var orphaned = guildCommands.Where(c => !_handler.SlashCommands.Any(s => s.Name == c.Name)).ToList();
+                foreach (var command in orphaned)
+                {
+                    _log.Info($"Deleting orphaned guild command /{command.Name} in {guild.Name} ({guild.Id})");
+                    await command.DeleteAsync();
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            _log.Error($"Failed to clean up orphaned guild commands: {e.Message}");
+        }
     }
 
     async Task HandleInteraction(SocketInteraction interaction)
