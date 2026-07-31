@@ -2,14 +2,27 @@ using App.Attributes;
 using App.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace App.Services;
+
+public class MemoryResult
+{
+    public string Summary { get; set; } = string.Empty;
+    public ulong? PublicMessageChannelId { get; set; }
+    public ulong? PublicMessageId { get; set; }
+}
 
 [Service]
 public class MemoryService
 {
+    record CacheEntry(string Summary, string CacheDate, ulong? PublicChannelId, ulong? PublicMessageId);
+
+    static readonly ConcurrentDictionary<(ulong GuildId, string PeriodType), CacheEntry> _cache = new();
+
     readonly LoggingService _log;
     readonly BotSettings _settings;
     readonly IHttpClientFactory _httpClientFactory;
@@ -23,29 +36,43 @@ public class MemoryService
         _archive = archive;
     }
 
-    public async Task<string> GenerateWeeklyAsync(ulong guildId)
+    public async Task<MemoryResult> GenerateWeeklyAsync(ulong guildId)
     {
+        var cached = GetCached(guildId, "weekly");
+        if (cached != null)
+            return ToResult(cached);
+
         var since = DateTime.UtcNow.AddDays(-7);
         var messages = await QueryMessagesAsync(guildId, since);
-        if (messages.Count == 0) return "Nenhuma mensagem arquivada esta semana.";
+        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada esta semana." };
 
         var content = FormatMessages(messages);
         var systemPrompt = $"Resuma as conversas da semana (últimos 7 dias, de {since:dd/MM/yyyy} até {DateTime.UtcNow:dd/MM/yyyy}) no servidor Discord em português. Destaque tópicos principais, decisões, discussões importantes. Seja conciso (máx 500 palavras).";
-        return await CallAIAsync(systemPrompt, content);
+        var summary = await CallAIAsync(systemPrompt, content);
+        summary = AddUserMentions(summary, messages);
+        SaveCache(guildId, "weekly", summary);
+        return new MemoryResult { Summary = summary };
     }
 
-    public async Task<string> GenerateMonthlyAsync(ulong guildId)
+    public async Task<MemoryResult> GenerateMonthlyAsync(ulong guildId)
     {
+        var cached = GetCached(guildId, "monthly");
+        if (cached != null)
+            return ToResult(cached);
+
         var since = DateTime.UtcNow.AddDays(-30);
         var messages = await QueryMessagesAsync(guildId, since);
-        if (messages.Count == 0) return "Nenhuma mensagem arquivada este mês.";
+        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada este mês." };
 
         var content = FormatMessages(messages);
         var systemPrompt = $"Resuma as conversas do mês (últimos 30 dias, de {since:dd/MM/yyyy} até {DateTime.UtcNow:dd/MM/yyyy}) no servidor Discord em português. Destaque tópicos principais, decisões, discussões importantes. Seja conciso (máx 500 palavras).";
-        return await CallAIAsync(systemPrompt, content);
+        var summary = await CallAIAsync(systemPrompt, content);
+        summary = AddUserMentions(summary, messages);
+        SaveCache(guildId, "monthly", summary);
+        return new MemoryResult { Summary = summary };
     }
 
-    public async Task<string> GenerateRecapAsync(ulong guildId, ulong userId)
+    public async Task<MemoryResult> GenerateRecapAsync(ulong guildId, ulong userId)
     {
         var lastMsg = await _archive.GetLastUserMessageAsync(guildId, userId);
         var since = lastMsg ?? DateTime.UtcNow.AddDays(-7);
@@ -53,11 +80,39 @@ public class MemoryService
         if (since < maxAge) since = maxAge;
 
         var messages = await QueryMessagesAsync(guildId, since, excludeUserId: userId);
-        if (messages.Count == 0) return "Nenhuma mensagem nova desde sua última mensagem.";
+        if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem nova desde sua última mensagem." };
 
         var content = FormatMessages(messages);
         var systemPrompt = $"Resuma as conversas que o usuário perdeu desde {since:dd/MM/yyyy HH:mm} no servidor Discord em português. Destaque tópicos principais, discussões. Seja conciso (máx 400 palavras).";
-        return await CallAIAsync(systemPrompt, content);
+        var summary = await CallAIAsync(systemPrompt, content);
+        return new MemoryResult { Summary = AddUserMentions(summary, messages) };
+    }
+
+    public void RegisterPublicMessage(ulong guildId, string periodType, ulong channelId, ulong messageId)
+    {
+        if (_cache.TryGetValue((guildId, periodType), out var entry))
+            _cache[(guildId, periodType)] = entry with { PublicChannelId = channelId, PublicMessageId = messageId };
+    }
+
+    static MemoryResult ToResult(CacheEntry entry) => new()
+    {
+        Summary = entry.Summary,
+        PublicMessageChannelId = entry.PublicChannelId,
+        PublicMessageId = entry.PublicMessageId
+    };
+
+    static CacheEntry? GetCached(ulong guildId, string periodType)
+    {
+        var today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        if (_cache.TryGetValue((guildId, periodType), out var entry) && entry.CacheDate == today)
+            return entry;
+        return null;
+    }
+
+    static void SaveCache(ulong guildId, string periodType, string summary)
+    {
+        if (string.IsNullOrWhiteSpace(summary) || summary.StartsWith("Erro")) return;
+        _cache[(guildId, periodType)] = new CacheEntry(summary, DateTime.UtcNow.ToString("yyyy-MM-dd"), null, null);
     }
 
     async Task<List<MessageRecord>> QueryMessagesAsync(ulong guildId, DateTime since, ulong? excludeUserId = null)
@@ -83,6 +138,33 @@ public class MemoryService
             sb.AppendLine($"[{m.Timestamp:yyyy-MM-dd HH:mm}] <{m.AuthorName}> em {ch}: {m.Content}");
         }
         return sb.ToString();
+    }
+
+    static string AddUserMentions(string summary, IEnumerable<MessageRecord> messages)
+    {
+        if (string.IsNullOrWhiteSpace(summary)) return summary;
+
+        var authors = messages
+            .Where(m => !string.IsNullOrWhiteSpace(m.AuthorName))
+            .GroupBy(m => m.AuthorId)
+            .Select(g => new { Name = g.First().AuthorName!, Id = g.Key })
+            .Where(a => a.Name.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.' or '-'))
+            .OrderByDescending(a => a.Name.Length)
+            .ToList();
+
+        foreach (var author in authors)
+        {
+            summary = Regex.Replace(
+                summary,
+                $@"\b{Regex.Escape(author.Name)}\b",
+                $"<@{author.Id}>",
+                RegexOptions.IgnoreCase
+            );
+        }
+
+        if (summary.Length > 4000)
+            summary = summary[..3997] + "...";
+        return summary;
     }
 
     async Task<string> CallAIAsync(string systemPrompt, string userContent)
