@@ -68,14 +68,39 @@ public class ScheduledMemoryService
             !await IsLastMessagesFromBotAsync(channel))
         {
             _log.Info($"Posting biweekly summary in #{channel.Name} ({guild.Name})");
-            var result = await _memory.GenerateWeeklyAsync(guild.Id);
+            var visible = GetEveryoneVisibleChannels(guild);
+            var omit = new HashSet<ulong> { channel.Id };
+            var result = await _memory.GenerateWeeklyAsync(guild.Id, visibleChannelIds: visible, omitChannelIds: omit);
             if (!IsPlaceholder(result.Summary))
             {
-                var embed = BuildEmbed($"Anteriormente em {guild.Name}", result.Summary, Color.Blue);
+                var title = $"Anteriormente em {guild.Name}";
+                var embed = BuildEmbed(title, result.Summary, Color.Blue);
+                embed.Footer = new EmbedFooterBuilder { Text = $"Resumo dos assuntos desde {result.SummarySince:dd/MM/yyyy}" };
                 await channel.SendMessageAsync(embed: embed.Build());
                 await _memory.RecordAutoPostAsync(guild.Id, "weekly", now);
             }
         }
+    }
+
+    static HashSet<ulong>? GetEveryoneVisibleChannels(SocketGuild guild)
+    {
+        var everyoneRole = guild.EveryoneRole;
+        var visible = new HashSet<ulong>();
+        foreach (var c in guild.Channels)
+        {
+            if (c is not SocketTextChannel textChannel) continue;
+            var overwrite = textChannel.GetPermissionOverwrite(everyoneRole);
+            if (overwrite.HasValue && overwrite.Value.ViewChannel == PermValue.Deny)
+                continue;
+            if (textChannel.Category != null)
+            {
+                var categoryOverwrite = textChannel.Category.GetPermissionOverwrite(everyoneRole);
+                if (categoryOverwrite.HasValue && categoryOverwrite.Value.ViewChannel == PermValue.Deny)
+                    continue;
+            }
+            visible.Add(c.Id);
+        }
+        return visible;
     }
 
     async Task<bool> IsLastMessagesFromBotAsync(SocketTextChannel channel)
@@ -97,7 +122,7 @@ public class ScheduledMemoryService
         Title = title,
         Description = description,
         Color = color,
-        Footer = new EmbedFooterBuilder { Text = "Gerado por IA" }
+        Footer = new EmbedFooterBuilder { Text = "Resumo por IA" }
     };
 
     static bool IsPlaceholder(string summary) =>

@@ -1,3 +1,4 @@
+using App.Extensions;
 using App.Services;
 using Discord;
 using Discord.Interactions;
@@ -10,36 +11,34 @@ namespace App.Modules;
 public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
 {
     readonly MemoryService _memory;
+    readonly GuildSettingsService _guildSettings;
 
-    public MemoryModule(MemoryService memory)
+    public MemoryModule(MemoryService memory, GuildSettingsService guildSettings)
     {
         _memory = memory;
+        _guildSettings = guildSettings;
     }
 
     [SlashCommand("anteriormente", "Resumo do que rolou no servidor (últimos 15 dias)")]
-    public async Task Anteriormente([Summary("publico", "Postar no chat para todos verem?")] bool publico = false)
+    public async Task Anteriormente()
     {
-        await DeferAsync(ephemeral: true);
+        await DeferAsync();
         var guildId = Context.Guild?.Id ?? 0;
         if (guildId == 0) { await FollowupAsync("Comando apenas em servidor.", ephemeral: true); return; }
 
-        var result = await _memory.GenerateWeeklyAsync(guildId);
+        var omit = BuildOmitChannels(guildId);
+        var result = await _memory.GenerateWeeklyAsync(guildId, visibleChannelIds: GetEveryoneVisibleChannels(), omitChannelIds: omit);
         var title = $"Anteriormente em {Context.Guild.Name}";
-        var embed = BuildEmbed(title, result.Summary, Color.Blue);
 
-        if (publico && !IsPlaceholder(result.Summary))
-            await FollowupAsync(embed: embed.Build(), ephemeral: false);
-        else
-        {
-            var embedPrivate = BuildEmbed(title, DeLinkify(result.Summary), Color.Blue);
-            await FollowupAsync(embed: embedPrivate.Build(), ephemeral: true);
-        }
+        var embed = BuildEmbed(title, result.Summary, Color.Blue);
+        embed.Footer = new EmbedFooterBuilder { Text = $"Resumo dos assuntos desde {result.SummarySince:dd/MM/yyyy}" };
+        await FollowupAsync(embed: embed.Build());
     }
 
     [SlashCommand("resumomes", "Resumo das conversas de um mês específico (formato MM/AAAA)")]
     public async Task ResumoMes([Summary("mes", "Mês no formato MM/AAAA (ex.: 07/2026). Padrão: mês atual.")] string mes = "")
     {
-        await DeferAsync(ephemeral: true);
+        await DeferAsync();
         var guildId = Context.Guild?.Id ?? 0;
         if (guildId == 0) { await FollowupAsync("Comando apenas em servidor.", ephemeral: true); return; }
 
@@ -58,12 +57,24 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
             year = int.Parse(match.Groups[2].Value);
         }
 
-        var result = await _memory.GenerateMonthAsync(guildId, month, year);
+        var omit = BuildOmitChannels(guildId);
+        var result = await _memory.GenerateMonthAsync(guildId, month, year, visibleChannelIds: GetEveryoneVisibleChannels(), omitChannelIds: omit);
         var monthName = new DateTime(year, month, 1).ToString("MMMM", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
         var title = $"Resumo de {monthName} de {year}";
-        var embed = BuildEmbed(title, DeLinkify(result.Summary), Color.Gold);
-        await FollowupAsync(embed: embed.Build(), ephemeral: true);
+
+        var embed = BuildEmbed(title, result.Summary, GetChannelColor(Context.Channel.Id));
+        if (result.SummarySince.HasValue)
+            embed.Footer = new EmbedFooterBuilder { Text = $"Resumo dos assuntos desde {result.SummarySince:dd/MM/yyyy}" };
+        await FollowupAsync(embed: embed.Build());
     }
+
+    static readonly Color[] _palette =
+    {
+        Color.Blue, Color.Gold, Color.Green, Color.Purple, Color.Red,
+        Color.Orange, Color.Magenta, Color.Teal, Color.DarkBlue, Color.DarkGreen
+    };
+
+    static Color GetChannelColor(ulong channelId) => _palette[(int)(channelId % (ulong)_palette.Length)];
 
     [SlashCommand("recap", "Resumo do que você perdeu desde sua última mensagem")]
     public async Task Recap()
@@ -72,10 +83,53 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         var guildId = Context.Guild?.Id ?? 0;
         if (guildId == 0) { await FollowupAsync("Comando apenas em servidor.", ephemeral: true); return; }
 
-        var result = await _memory.GenerateRecapAsync(guildId, Context.User.Id);
+        var omit = BuildOmitChannels(guildId);
+        var result = await _memory.GenerateRecapAsync(guildId, Context.User.Id, visibleChannelIds: GetEveryoneVisibleChannels(), omitChannelIds: omit);
         var embed = BuildEmbed("Você Perdeu", DeLinkify(result.Summary), Color.Purple);
+        if (result.SummarySince.HasValue)
+            embed.Footer = new EmbedFooterBuilder { Text = $"Resumo dos assuntos desde {result.SummarySince:dd/MM/yyyy HH:mm}" };
         await FollowupAsync(embed: embed.Build(), ephemeral: true);
     }
+
+    HashSet<ulong>? GetEveryoneVisibleChannels()
+    {
+        if (Context.Guild == null) return null;
+
+        var everyoneRole = Context.Guild.EveryoneRole;
+        var visible = new HashSet<ulong>();
+        foreach (var channel in Context.Guild.Channels)
+        {
+            if (channel is not SocketTextChannel textChannel) continue;
+            if (CanEveryoneView(textChannel, everyoneRole))
+                visible.Add(channel.Id);
+        }
+        return visible;
+    }
+
+    static bool CanEveryoneView(SocketTextChannel channel, SocketRole everyoneRole)
+    {
+        var overwrite = channel.GetPermissionOverwrite(everyoneRole);
+        if (overwrite.HasValue && overwrite.Value.ViewChannel == PermValue.Deny)
+            return false;
+        if (channel.Category != null)
+        {
+            var categoryOverwrite = channel.Category.GetPermissionOverwrite(everyoneRole);
+            if (categoryOverwrite.HasValue && categoryOverwrite.Value.ViewChannel == PermValue.Deny)
+                return false;
+        }
+        return true;
+    }
+
+    HashSet<ulong> BuildOmitChannels(ulong guildId)
+    {
+        var omit = new HashSet<ulong> { Context.Channel.Id };
+        var settings = _guildSettings.GetGuildSettings(guildId);
+        if (settings.MainTextChannelId.HasValue)
+            omit.Add(settings.MainTextChannelId.Value);
+        return omit;
+    }
+
+    readonly Dictionary<ulong, string> _nameCache = new();
 
     string DeLinkify(string summary)
     {
@@ -83,13 +137,21 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
 
         summary = Regex.Replace(summary, @"<@(\d+)>", m =>
         {
-            var user = Context.Guild.GetUser(ulong.Parse(m.Groups[1].Value));
-            return user != null ? $"@{user.DisplayName}" : m.Value;
+            var id = ulong.Parse(m.Groups[1].Value);
+            if (_nameCache.TryGetValue(id, out var cached)) return cached;
+            var user = Context.Guild.GetUser(id);
+            var name = user != null ? user.GetNameSafe() : null;
+            _nameCache[id] = name ?? m.Value;
+            return _nameCache[id];
         });
         summary = Regex.Replace(summary, @"<#(\d+)>", m =>
         {
-            var channel = Context.Guild.GetChannel(ulong.Parse(m.Groups[1].Value));
-            return channel != null ? $"#{channel.Name}" : m.Value;
+            var id = ulong.Parse(m.Groups[1].Value);
+            if (_nameCache.TryGetValue(id, out var cached)) return cached;
+            var channel = Context.Guild.GetChannel(id);
+            var name = channel != null ? $"#{channel.Name}" : null;
+            _nameCache[id] = name ?? m.Value;
+            return _nameCache[id];
         });
         return summary;
     }
@@ -99,7 +161,7 @@ public class MemoryModule : InteractionModuleBase<SocketInteractionContext>
         Title = title,
         Description = description,
         Color = color,
-        Footer = new EmbedFooterBuilder { Text = "Gerado por IA" }
+        Footer = new EmbedFooterBuilder { Text = "Resumo por IA" }
     };
 
     static bool IsPlaceholder(string summary) =>

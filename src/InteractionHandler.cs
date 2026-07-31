@@ -64,10 +64,12 @@ public class InteractionHandler
             foreach (var guild in _client.Guilds)
             {
                 var guildCommands = await guild.GetApplicationCommandsAsync();
-                var orphaned = guildCommands.Where(c => !_handler.SlashCommands.Any(s => s.Name == c.Name)).ToList();
-                foreach (var command in orphaned)
+                // The bot only registers commands globally. Any guild-level command is a
+                // leftover from old deployments and shadows the global one (e.g. /clima
+                // without its parameters). Delete them all.
+                foreach (var command in guildCommands)
                 {
-                    _log.Info($"Deleting orphaned guild command /{command.Name} in {guild.Name} ({guild.Id})");
+                    _log.Info($"Deleting stale guild command /{command.Name} in {guild.Name} ({guild.Id})");
                     await command.DeleteAsync();
                 }
             }

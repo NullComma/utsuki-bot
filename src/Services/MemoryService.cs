@@ -11,6 +11,7 @@ namespace App.Services;
 public class MemoryResult
 {
     public string Summary { get; set; } = string.Empty;
+    public DateTime? SummarySince { get; set; }
 }
 
 [Service]
@@ -32,53 +33,51 @@ public class MemoryService
     const int WeeklyLookbackDays = 15;
     const int MinMessagesForSummary = 100;
 
-    public async Task<MemoryResult> GenerateWeeklyAsync(ulong guildId)
+    public async Task<MemoryResult> GenerateWeeklyAsync(ulong guildId, HashSet<ulong>? visibleChannelIds = null, HashSet<ulong>? omitChannelIds = null)
     {
         var since = DateTime.UtcNow.AddDays(-WeeklyLookbackDays);
-        var messages = await QueryMessagesAsync(guildId, since);
+        var messages = await QueryMessagesAsync(guildId, since, visibleChannelIds: visibleChannelIds);
         if (messages.Count < MinMessagesForSummary)
-            messages = await QueryMessagesAsync(guildId, null, take: MinMessagesForSummary);
+            messages = await QueryMessagesAsync(guildId, null, take: MinMessagesForSummary, visibleChannelIds: visibleChannelIds);
         if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada." };
 
-        var content = FormatMessages(messages);
+        var content = FormatMessages(messages, omitChannelIds);
         var range = messages.Count >= MinMessagesForSummary
             ? $"últimos {WeeklyLookbackDays} dias, de {messages.Min(m => m.Timestamp):dd/MM/yyyy} até {messages.Max(m => m.Timestamp):dd/MM/yyyy}"
             : $"as últimas {messages.Count} mensagens, de {messages.Min(m => m.Timestamp):dd/MM/yyyy} até {messages.Max(m => m.Timestamp):dd/MM/yyyy}";
-        var systemPrompt = BuildSummaryPrompt(range, 200, 8);
+        var systemPrompt = BuildSummaryPrompt(range, 300, 10);
         var summary = await CallAIAsync(systemPrompt, content);
-        summary = Linkify(summary, messages);
-        return new MemoryResult { Summary = summary };
+        summary = Linkify(summary, messages, omitChannelIds);
+        return new MemoryResult { Summary = summary, SummarySince = messages.Min(m => m.Timestamp) };
     }
 
-    public async Task<MemoryResult> GenerateMonthAsync(ulong guildId, int month, int year)
+    public async Task<MemoryResult> GenerateMonthAsync(ulong guildId, int month, int year, HashSet<ulong>? visibleChannelIds = null, HashSet<ulong>? omitChannelIds = null)
     {
         var start = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = start.AddMonths(1);
-        var messages = await QueryMessagesAsync(guildId, start, end);
+        var messages = await QueryMessagesAsync(guildId, start, end, visibleChannelIds: visibleChannelIds);
         if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem arquivada neste mês." };
 
-        var content = FormatMessages(messages);
+        var content = FormatMessages(messages, omitChannelIds);
         var monthName = start.ToString("MMMM", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
-        var systemPrompt = BuildSummaryPrompt($"{monthName} de {year} ({start:dd/MM/yyyy} até {end.AddDays(-1):dd/MM/yyyy})", 250, 10);
+        var systemPrompt = BuildSummaryPrompt($"{monthName} de {year} ({start:dd/MM/yyyy} até {end.AddDays(-1):dd/MM/yyyy})", 350, 12);
         var summary = await CallAIAsync(systemPrompt, content);
-        summary = Linkify(summary, messages);
-        return new MemoryResult { Summary = summary };
+        summary = Linkify(summary, messages, omitChannelIds);
+        return new MemoryResult { Summary = summary, SummarySince = start };
     }
 
-    public async Task<MemoryResult> GenerateRecapAsync(ulong guildId, ulong userId)
+    public async Task<MemoryResult> GenerateRecapAsync(ulong guildId, ulong userId, HashSet<ulong>? visibleChannelIds = null, HashSet<ulong>? omitChannelIds = null)
     {
         var lastMsg = await _archive.GetLastUserMessageAsync(guildId, userId);
         var since = lastMsg ?? DateTime.UtcNow.AddDays(-7);
-        var maxAge = DateTime.UtcNow.AddDays(-14);
-        if (since < maxAge) since = maxAge;
 
-        var messages = await QueryMessagesAsync(guildId, since, excludeUserId: userId);
+        var messages = await QueryMessagesAsync(guildId, since, excludeUserId: userId, visibleChannelIds: visibleChannelIds);
         if (messages.Count == 0) return new MemoryResult { Summary = "Nenhuma mensagem nova desde sua última mensagem." };
 
-        var content = FormatMessages(messages);
-        var systemPrompt = BuildSummaryPrompt($"desde {since:dd/MM/yyyy HH:mm}", 150, 6);
+        var content = FormatMessages(messages, omitChannelIds);
+        var systemPrompt = BuildSummaryPrompt($"desde {since:dd/MM/yyyy HH:mm}", 300, 10);
         var summary = await CallAIAsync(systemPrompt, content);
-        return new MemoryResult { Summary = Linkify(summary, messages) };
+        return new MemoryResult { Summary = Linkify(summary, messages, omitChannelIds), SummarySince = since };
     }
 
     public async Task<DateTime?> GetLastAutoPostAsync(ulong guildId, string postType)
@@ -105,7 +104,7 @@ public class MemoryService
         await ctx.SaveChangesAsync();
     }
 
-    async Task<List<MessageRecord>> QueryMessagesAsync(ulong guildId, DateTime? since = null, DateTime? until = null, int take = 500, ulong? excludeUserId = null)
+    async Task<List<MessageRecord>> QueryMessagesAsync(ulong guildId, DateTime? since = null, DateTime? until = null, int take = 500, ulong? excludeUserId = null, HashSet<ulong>? visibleChannelIds = null)
     {
         using var ctx = CreateContext();
         var query = ctx.Messages
@@ -117,6 +116,8 @@ public class MemoryService
             query = query.Where(m => m.Timestamp < until.Value);
         if (excludeUserId.HasValue)
             query = query.Where(m => m.AuthorId != excludeUserId.Value);
+        if (visibleChannelIds != null)
+            query = query.Where(m => visibleChannelIds.Contains(m.ChannelId));
 
         var result = await query
             .OrderByDescending(m => m.Timestamp)
@@ -126,26 +127,27 @@ public class MemoryService
         return result;
     }
 
-    static string FormatMessages(List<MessageRecord> messages)
+    static string FormatMessages(List<MessageRecord> messages, HashSet<ulong>? omitChannelIds = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("Histórico de mensagens:\n");
         foreach (var m in messages)
         {
-            var ch = !string.IsNullOrEmpty(m.ChannelName) ? $"#{m.ChannelName}" : $"ch:{m.ChannelId}";
-            sb.AppendLine($"[{m.Timestamp:yyyy-MM-dd HH:mm}] <{m.AuthorName}> em {ch}: {m.Content}");
+            var omit = omitChannelIds != null && omitChannelIds.Contains(m.ChannelId);
+            var ch = omit || string.IsNullOrEmpty(m.ChannelName) ? "" : $" em #{m.ChannelName}";
+            sb.AppendLine($"[{m.Timestamp:yyyy-MM-dd HH:mm}] <{m.AuthorName}>{ch}: {m.Content}");
         }
         return sb.ToString();
     }
 
-    static string Linkify(string summary, IEnumerable<MessageRecord> messages)
+    static string Linkify(string summary, IEnumerable<MessageRecord> messages, HashSet<ulong>? omitChannelIds = null)
     {
         if (string.IsNullOrWhiteSpace(summary)) return summary;
 
         summary = NormalizeInvisible(summary);
 
         var channels = messages
-            .Where(m => m.ChannelId != 0)
+            .Where(m => m.ChannelId != 0 && (omitChannelIds == null || !omitChannelIds.Contains(m.ChannelId)))
             .GroupBy(m => m.ChannelId)
             .Select(g => new { Name = g.First().ChannelName, Id = g.Key })
             .OrderByDescending(c => c.Name?.Length ?? 0)
@@ -158,7 +160,7 @@ public class MemoryService
         }
 
         summary = AddUserMentions(summary, messages);
-        summary = AddChannelMentions(summary, messages);
+        summary = AddChannelMentions(summary, messages, omitChannelIds);
 
         if (summary.Length > 4000)
             summary = summary[..3997] + "...";
@@ -209,12 +211,12 @@ public class MemoryService
         return summary;
     }
 
-    static string AddChannelMentions(string summary, IEnumerable<MessageRecord> messages)
+    static string AddChannelMentions(string summary, IEnumerable<MessageRecord> messages, HashSet<ulong>? omitChannelIds = null)
     {
         if (string.IsNullOrWhiteSpace(summary)) return summary;
 
         var channels = messages
-            .Where(m => !string.IsNullOrWhiteSpace(m.ChannelName))
+            .Where(m => !string.IsNullOrWhiteSpace(m.ChannelName) && (omitChannelIds == null || !omitChannelIds.Contains(m.ChannelId)))
             .GroupBy(m => m.ChannelId)
             .Select(g => new { Name = NormalizeInvisible(g.First().ChannelName!), Id = g.Key })
             .Where(c => !string.IsNullOrWhiteSpace(c.Name))
@@ -244,11 +246,14 @@ public class MemoryService
     static string BuildSummaryPrompt(string range, int maxWords, int maxBullets)
     {
         return $"Resuma as conversas do servidor Discord referentes a {range}, em português. " +
-               $"Formato: apenas bullets curtos e diretos, no estilo recapitulação de série, sem cabeçalhos, sem subtítulos, sem listas aninhadas. " +
-               $"Regras: máximo {maxBullets} bullets e {maxWords} palavras no total; frases curtas e objetivas; " +
-               $"sem floreios, sem adjetivos, sem emojis, sem markdown além dos bullets. " +
-               $"Cite sempre os nomes de usuários exatamente como aparecem no histórico (ex.: Fulano, Beltrano) " +
-               $"e os canais como aparecem (ex.: geral, off-topic), para que os links de menção funcionem.";
+               $"Formato: bullets curtos e diretos, no estilo recapitulação de série, sem cabeçalhos, sem subtítulos, sem listas aninhadas. " +
+               $"Regras: máximo {maxBullets} bullets e {maxWords} palavras no total; cada bullet pode ter 1 a 3 frases. " +
+               $"Seja descritivo o suficiente para dar contexto do que aconteceu, mas sem enrolação; " +
+               $"sem emojis e sem markdown além dos bullets. " +
+               $"Cite sempre os nomes de usuários exatamente como aparecem no histórico (ex.: Fulano, Beltrano), " +
+               $"para que os links de menção funcionem. " +
+               $"Cite o nome do canal somente quando ele aparecer no histórico (ex.: em #off-topic); " +
+               $"se a mensagem não tiver canal, não mencione canal nenhum.";
     }
 
     async Task<string> CallAIAsync(string systemPrompt, string userContent)
